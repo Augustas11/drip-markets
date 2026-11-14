@@ -5,6 +5,10 @@
 //!   (a rule or base may be wasm:<file.wasm>, docs/flop-compute/CHALLENGE_ABI.md)
 //!   flop-score pin <dir> <loader>:<file>...
 //!   flop-score list
+//!   flop-score --check v3 --data <recorder pin> --rule <name> [--base spec] [--split tune|heldout|all] [--seeds 1..8] [--k 6]
+//!   (check v3 also with FLOP_SCORE_V3=1; docs/flop-compute/SCORER.md, "Check v3")
+//!   flop-score --check v4 --data <recorder pin> --rule <name> [--split tune|heldout|all] [--seeds 1..8] [--baselines spec,routed,...|none] [--threads N]
+//!   (check v4 also with FLOP_SCORE_V4=1; docs/flop-compute/SCORER.md, "Check v4")
 //!
 //! Exit 0: it ran, the first line is the number. Anything else: it did not.
 
@@ -12,7 +16,7 @@ use anyhow::{bail, Context, Result};
 use flop_index::score::{self, data, rules, Split, SCENARIOS};
 use std::path::PathBuf;
 
-const USAGE: &str = "usage: flop-score --data <pin dir> --rule <name|wasm:file> [--base spec] [--split tune|heldout|all] [--seed N]\n       flop-score pin <dir> <loader>:<file>...\n       flop-score list";
+const USAGE: &str = "usage: flop-score --data <pin dir> --rule <name|wasm:file> [--base spec] [--split tune|heldout|all] [--seed N]\n       flop-score --check v3 --data <recorder pin> --rule <name|wasm:file> [--base spec] [--split tune|heldout|all] [--seeds 1..8] [--k 6]\n       flop-score --check v4 --data <recorder pin> --rule <name|wasm:file> [--split tune|heldout|all] [--seeds 1..8] [--baselines spec,routed,routed-tm60,all-median,wide|none] [--threads N]\n       flop-score pin <dir> <loader>:<file>...\n       flop-score list";
 
 fn day(d: u64) -> String {
     // Civil from days (H. Hinnant), for the report's date range.
@@ -43,6 +47,14 @@ fn run(args: &[String]) -> Result<()> {
         }
         _ => {}
     }
+    let v4 = std::env::var_os("FLOP_SCORE_V4").is_some_and(|v| v == "1") || args.windows(2).any(|w| w[0] == "--check" && w[1] == "v4");
+    if v4 {
+        return run_v4(args);
+    }
+    let v3 = std::env::var_os("FLOP_SCORE_V3").is_some_and(|v| v == "1") || args.windows(2).any(|w| w[0] == "--check" && w[1] == "v3");
+    if v3 {
+        return run_v3(args);
+    }
     let (mut data_dir, mut rule, mut base, mut split, mut seed) = (None, None, "spec".to_owned(), Split::Tune, 1u64);
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -58,12 +70,6 @@ fn run(args: &[String]) -> Result<()> {
     }
     let data_dir = data_dir.context(USAGE)?;
     let rule = rule.context(USAGE)?;
-    let get = |name: &str| -> Result<Box<dyn rules::Rule>> {
-        match name.strip_prefix("wasm:") {
-            Some(path) => Ok(Box::new(score::wasm::WasmRule::load(path.as_ref())?)),
-            None => rules::by_name(name).with_context(|| format!("no rule {name:?}; flop-score list")),
-        }
-    };
     let (cand, base_rule) = (get(&rule)?, get(&base)?);
     let (series, manifest) = data::load(&data_dir)?;
     let snaps: usize = series.iter().map(|s| s.snaps.len()).sum();
@@ -83,6 +89,108 @@ fn run(args: &[String]) -> Result<()> {
     let gate = if r.passes() { "above" } else { "not above" };
     let note = if split == Split::Heldout { "" } else { " (the gate counts only --split heldout)" };
     println!("gate: gain is {gate} 2 x se{note}");
+    Ok(())
+}
+
+fn get(name: &str) -> Result<Box<dyn rules::Rule>> {
+    match name.strip_prefix("wasm:") {
+        Some(path) => Ok(Box::new(score::wasm::WasmRule::load(path.as_ref())?)),
+        None => rules::by_name(name).with_context(|| format!("no rule {name:?}; flop-score list")),
+    }
+}
+
+/// Check v3 (score/v3.rs): every model in a 5-minute recorder pin, seeds
+/// pooled, term and GATE lines.
+fn run_v3(args: &[String]) -> Result<()> {
+    let (mut data_dir, mut rule, mut base, mut split, mut seeds, mut k) = (None, None, "spec".to_owned(), Split::Tune, (1u64..=8).collect::<Vec<_>>(), score::v3::REVERSAL_K);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut val = || it.next().with_context(|| format!("{a} needs a value\n{USAGE}"));
+        match a.as_str() {
+            "--check" => {
+                let v = val()?;
+                if v != "v3" {
+                    bail!("--check takes v3 (v1 is the default, v2 is FLOP_SCORE_V2=1), not {v:?}");
+                }
+            }
+            "--data" => data_dir = Some(PathBuf::from(val()?)),
+            "--rule" => rule = Some(val()?.clone()),
+            "--base" => base = val()?.clone(),
+            "--split" => split = val()?.parse()?,
+            "--seed" => seeds = vec![val()?.parse().context("--seed is a number")?],
+            "--seeds" => {
+                let v = val()?;
+                let (a, b) = v.split_once("..").context("--seeds is A..B")?;
+                let (a, b): (u64, u64) = (a.parse().context("--seeds A..B")?, b.parse().context("--seeds A..B")?);
+                if a > b {
+                    bail!("--seeds {v}: empty");
+                }
+                seeds = (a..=b).collect();
+            }
+            "--k" => k = val()?.parse().context("--k is a number of steps")?,
+            other => bail!("unknown argument {other:?}\n{USAGE}"),
+        }
+    }
+    let data_dir = data_dir.context(USAGE)?;
+    let rule = rule.context(USAGE)?;
+    let (cand, base_rule) = (get(&rule)?, get(&base)?);
+    let (series, manifest) = score::v3::load(&data_dir)?;
+    let lines = score::v3::report(cand.as_ref(), base_rule.as_ref(), &rule, &base, &series, &manifest, &data_dir.display().to_string(), split, &seeds, k)?;
+    for l in lines {
+        println!("{l}");
+    }
+    Ok(())
+}
+
+/// Check v4 (score/v4.rs): the rule and the baselines on every model of a
+/// 5-minute recorder pin, attacker types U/S/P/M/F, liveliness, level, phantom.
+fn run_v4(args: &[String]) -> Result<()> {
+    let (mut data_dir, mut rule, mut split, mut seeds) = (None, None, Split::Tune, (1u64..=8).collect::<Vec<_>>());
+    let mut baselines: Vec<String> = score::v4::BASELINES.iter().map(|s| s.to_string()).collect();
+    let mut threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut val = || it.next().with_context(|| format!("{a} needs a value\n{USAGE}"));
+        match a.as_str() {
+            "--check" => {
+                let v = val()?;
+                if v != "v4" {
+                    bail!("--check takes v3 or v4, not {v:?}");
+                }
+            }
+            "--data" => data_dir = Some(PathBuf::from(val()?)),
+            "--rule" => rule = Some(val()?.clone()),
+            "--split" => split = val()?.parse()?,
+            "--seed" => seeds = vec![val()?.parse().context("--seed is a number")?],
+            "--seeds" => {
+                let v = val()?;
+                let (a, b) = v.split_once("..").context("--seeds is A..B")?;
+                let (a, b): (u64, u64) = (a.parse().context("--seeds A..B")?, b.parse().context("--seeds A..B")?);
+                if a > b {
+                    bail!("--seeds {v}: empty");
+                }
+                seeds = (a..=b).collect();
+            }
+            "--baselines" => {
+                let v = val()?;
+                baselines = if v == "none" { vec![] } else { v.split(',').map(str::to_owned).collect() };
+            }
+            "--threads" => threads = val()?.parse().context("--threads is a number")?,
+            other => bail!("unknown argument {other:?}\n{USAGE}"),
+        }
+    }
+    let data_dir = data_dir.context(USAGE)?;
+    let rule = rule.context(USAGE)?;
+    // Fail early on an unknown name.
+    for r in std::iter::once(&rule).chain(&baselines) {
+        get(r)?;
+    }
+    let (series, manifest) = score::v3::load(&data_dir)?;
+    let factory = |n: &str| get(n);
+    let lines = score::v4::report(&rule, &baselines, &factory, &series, &manifest, &data_dir.display().to_string(), split, &seeds, threads)?;
+    for l in lines {
+        println!("{l}");
+    }
     Ok(())
 }
 

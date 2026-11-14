@@ -16,6 +16,14 @@ pub trait Rule {
     fn disqualified(&self) -> Option<String> {
         None
     }
+    /// Check v3 calls this instead of `step`: the same listing plus each
+    /// endpoint's `uptime_30m` (percent, parallel to `endpoints`; None = not
+    /// reported). The default ignores uptime, so a rule that only implements
+    /// `step` behaves the same under every check.
+    fn step_v3(&mut self, at_ms: u64, endpoints: &[OrEndpoint], uptime: &[Option<f64>]) -> Option<f64> {
+        let _ = uptime;
+        self.step(at_ms, endpoints)
+    }
 }
 
 /// USD per 1M tokens at the SPEC's 15:1 input:output blend.
@@ -69,9 +77,54 @@ impl Rule for Mean {
     }
 }
 
-/// Every rule by name: `spec`, `spec-median`, `mean`, then candidates::ALL.
+/// Check v3's level reference as a rule, no state (`super::v3::routed`):
+/// what a request pays now. A reference, not a candidate. It needs uptime,
+/// so it prices only under check v3; on data without uptime it holds.
+#[derive(Clone)]
+pub struct Routed;
+impl Rule for Routed {
+    fn step(&mut self, at_ms: u64, endpoints: &[OrEndpoint]) -> Option<f64> {
+        self.step_v3(at_ms, endpoints, &vec![None; endpoints.len()])
+    }
+    fn step_v3(&mut self, _: u64, endpoints: &[OrEndpoint], uptime: &[Option<f64>]) -> Option<f64> {
+        super::v3::routed(endpoints, uptime)
+    }
+    fn clone_box(&self) -> Box<dyn Rule> {
+        Box::new(self.clone())
+    }
+}
+
+/// Check v4's level reference as a rule (`routed-tm60`): the time-median of
+/// `routed` over the last 60 minutes (snapshots at or after now − 60 min,
+/// with R60_SLACK_MS for recorder jitter, so 13 snapshots at a 5-minute
+/// cadence; the mean of the two middle values when the count is even). A yardstick,
+/// not a candidate: it trusts any seller with uptime, fakes included.
+#[derive(Clone, Default)]
+pub struct RoutedTm60 {
+    win: std::collections::VecDeque<(u64, f64)>,
+}
+impl Rule for RoutedTm60 {
+    fn step(&mut self, at_ms: u64, endpoints: &[OrEndpoint]) -> Option<f64> {
+        self.step_v3(at_ms, endpoints, &vec![None; endpoints.len()])
+    }
+    fn step_v3(&mut self, at_ms: u64, endpoints: &[OrEndpoint], uptime: &[Option<f64>]) -> Option<f64> {
+        if let Some(r) = super::v3::routed(endpoints, uptime) {
+            self.win.push_back((at_ms, r));
+        }
+        while self.win.front().is_some_and(|(t, _)| *t + super::v4::R60_MS + super::v4::R60_SLACK_MS < at_ms) {
+            self.win.pop_front();
+        }
+        super::v4::median(self.win.iter().map(|(_, r)| *r).collect())
+    }
+    fn clone_box(&self) -> Box<dyn Rule> {
+        Box::new(self.clone())
+    }
+}
+
+/// Every rule by name: `spec`, `spec-median`, `mean`, `routed`,
+/// `routed-tm60`, then candidates::ALL.
 pub fn names() -> Vec<&'static str> {
-    let mut v = vec!["spec", "spec-median", "mean"];
+    let mut v = vec!["spec", "spec-median", "mean", "routed", "routed-tm60"];
     v.extend(super::candidates::ALL.iter().map(|(n, _)| *n));
     v
 }
@@ -81,6 +134,8 @@ pub fn by_name(name: &str) -> Option<Box<dyn Rule>> {
         "spec" => Some(Box::new(Spec)),
         "spec-median" => Some(Box::new(SpecMedian)),
         "mean" => Some(Box::new(Mean)),
+        "routed" => Some(Box::new(Routed)),
+        "routed-tm60" => Some(Box::new(RoutedTm60::default())),
         _ => super::candidates::ALL.iter().find(|(n, _)| *n == name).map(|(_, f)| f()),
     }
 }

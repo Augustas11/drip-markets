@@ -164,6 +164,114 @@ paired gain over the current rule is above twice its standard error, and an
 independent review has not vetoed it. A recommendation comes with
 the numbers. It does not change the live rule; that takes a reviewed change to this spec.
 
+## Settlement rule clamp3 (proposed, off by default)
+
+A proposed replacement for the live rule above. It is code and config
+only: the live rule is unchanged, and `verify-push-log` refuses clamp3
+lines until this spec adopts it. Code: `flop-index/src/clamp3.rs`; scorer
+name `clamp3`.
+
+**The rule** (one step per 5-minute fetch):
+
+1. Only proven sellers count: a provider on the allow-list
+   (`or_proven_at_start`, empty by default; names match OpenRouter provider
+   names exactly after trimming whitespace) with a valid up row at the
+   first step, or one with 24 h of serving (up, uptime_30m > 0, at most 10
+   minutes credited per step). Rows with a junk price never count, and a
+   down or invalid row at the first step is never grandfathered. A seller
+   that is not proven and has had no valid up row for 24 h is forgotten.
+2. A seller's price is the median of its own last 13 up prices.
+3. When 60% of the proven sellers up now (half, at least 5, in a big market)
+   moved the same way over the last 2 hours, the smallest of those moves is
+   credited to the others as a market move, never against the last one
+   within 25 steps, fading over 12 h.
+4. Each seller's price plus credit is clamped to the last mark ×/÷ 3.
+5. The mark is the routed formula over sellers up most of the last hour
+   (weight uptime / price², no seller above 24%).
+6. The mark moves at most 1% a step plus that step's market-wide move (up
+   to 0.1 log). There is no mark until a proven seller counts, and none
+   again once no proven seller has counted for 15 minutes (3 steps).
+
+**Against the live rule**, benchmark, clean data. R60 is the 60-minute
+median of the routed price (SCORER.md, "Check v4"):
+
+| | clamp3 | spec |
+|---|---|---|
+| daily high-low range (L1) | 22.6% | 2.5% |
+| largest 5-minute step | 1.0% | 2.5% |
+| correlation of 1-hour moves with R60 (L2) | 0.78 | 0.01 |
+| median distance from R60, log | 0.013 | 0.530 |
+| steps at the 1% limit | 29.6% | n/a |
+| worst move by one unproven listing, log | 0 | 3.47 |
+
+`flop-score --check v4 --data <pin> --rule clamp3 --split all --seeds 1..8`
+on the benchmark passes U, U_finite, S (0.087, limit 0.12), M (0.92), F
+(0.98), echo_step (0.020), echo_error (0.098), L1-L3 and level (0.013).
+On the wide set, held out (20 models), it passes U, U_finite, S (0.105), M
+(0.91), F (0.98), L2 (0.74), L3 and level (0.014). The largest step and the
+share of steps at the limit come from replaying the rule over the benchmark;
+they are not printed by the scorer.
+
+**Data.** The numbers need recorder data, which is not public (see
+SCORER.md, "Recording a pin"). The benchmark pin holds one model
+(`qwen/qwen3.8-27b`), 802 snapshots from 2026-11-11 11:08 to 2026-11-14
+05:50 UTC (66.7 h); its MANIFEST has sha256
+`d317cecbb64ea89af999922cdc499b38f8af74ba5dbb6a6a291023523f73421b`. The
+wide pin holds 21.2 h of 41 models with 5+ sellers (MANIFEST sha256
+`a307528c46e1329b22d85db69fa35b247ae5d4793eb7f06d2439af61c83b6032`), so no
+seller can earn 24 h there: the check counts every seller in a series'
+first snapshot as proven.
+
+**Weaknesses.**
+
+- Fails P: one proven seller holding x0.8 moves the mark 0.069, over its
+  0.056 fair share (1.23x); 13 sellers halving move it 0.23 in the first
+  35 minutes, 2.3x the limit. Held-out wide: 2.67x and 2.47x.
+- Fails phantom: 22% of its movement on the benchmark (42% on held-out
+  wide) comes from sellers coming and going, not from prices (limit 20%).
+  It moves on availability alone.
+- Held-out wide also fails echo_step (60% halving: a 0.100 step),
+  echo_error (all halving: 0.236 off) and L1 (8.9% a day against spec's
+  13.9%). The tune split fails the same six gates.
+- 60% of sellers halving leaves the mark 0.27 off the move on the
+  benchmark (reported, not gated).
+- A 30-minute spike by one proven seller moves it up to 0.087; a
+  90-minute one 0.20 (two sellers: 0.24, not gated). One seller's
+  sustained change moves it more than its share (P above).
+- Coalitions: the 11 dearest of 22 halving move the mark 0.71, the whole
+  move (spec: 0.74); 10 of 20 move it 0.18 (spec: 0.11). 3 proven sellers
+  cutting to x0.001 move it 2.2 log (spec: 6.2), 5 move it 6.4 (spec: 6.2);
+  5 walking down 2% a step drag it about 1% a step without end (5.8 log in
+  56 h).
+- It lags, and a ramp at the speed limit is predictable: 29.6% of steps
+  sit at the 1% limit.
+- If proven sellers drop out, the rule stops giving a mark 15 minutes after
+  the last one stops counting (a seller counts while up in most of the last
+  hour), and the pusher then does not push.
+- Steps are assumed to be 5 minutes: the pusher refuses to start under
+  clamp3 unless `or_refresh_s = 300`.
+- With fewer than 5 counted sellers the 24% cap leaves weight no seller
+  takes (at least 4% with 4 sellers, 28% with 3, 52% with 2, 76% with 1),
+  and that part of the mark rests on a stored price that moves only on
+  market-wide moves.
+- Cold start: with an empty allow-list and no warm start, nothing counts
+  for 24 h and the pusher does not push.
+- A clamp3 mark cannot be recomputed from one push line (it needs the
+  rule's history); the line logs the spec quote beside it, which can.
+
+**Switching over.** On 2026-11-14 05:50 UTC the live rule read $0.3036 and
+clamp3 $0.1785, about -0.53 log (-41%). Turning it on moves the mark that
+much at once, so it must be announced in advance.
+
+**Turning it on** (pusher config, `[oracle]`): `or_mark_rule = "clamp3"`,
+`or_refresh_s = 300`, `or_proven_at_start = ["DeepInfra", ...]`, and
+`or_warm_start_dir` set to the `staging record-or` directory, which is
+replayed before the first live step. The live steps continue that replay
+exactly only while the pusher fetches what the recorder saved, at the same
+times. At start the pusher logs which allow-list names matched a provider
+up at the first replayed (or first live) snapshot and which did not. The
+defaults (`"spec"`, `[]`, `""`) change nothing.
+
 ## Manipulation limits (FLOP side)
 
 - No buyer and no miner carries more than 45% of the window's weight

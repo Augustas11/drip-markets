@@ -23,8 +23,8 @@ fn day(at_ms: u64) -> String {
     chrono::DateTime::from_timestamp_millis(at_ms as i64).map(|t| t.format("%Y-%m-%d").to_string()).unwrap_or_else(|| "bad-date".into())
 }
 
-/// One snapshot line.
-fn line(at_ms: u64, url: &str, text: &str) -> String {
+/// One snapshot line (clamp3 in the pusher steps on the same line).
+pub(super) fn line(at_ms: u64, url: &str, text: &str) -> String {
     let mut v = serde_json::json!({ "at_ms": at_ms, "url": url, "rows": null, "raw": text });
     match record_rows(text) {
         Ok(rows) => v["rows"] = serde_json::to_value(rows).unwrap_or_default(),
