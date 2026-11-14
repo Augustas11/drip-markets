@@ -1,0 +1,7 @@
+node_modules
+dist
+.roundtrip/
+roundtrip-result.json
+.vercel
+public/compute-feed/
+tsconfig.tsbuildinfo

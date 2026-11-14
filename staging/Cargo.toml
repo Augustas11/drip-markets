@@ -1,0 +1,32 @@
+[package]
+name = "staging"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/Augustas11/drip-markets"
+publish = false
+
+# The market bots: mark pusher, OpenRouter recorder, launch steps.
+[dependencies]
+drip = { path = "../cranker" }
+percolator-prog = { path = "../upstream/percolator-prog" }
+# Same engine rev as cranker/Cargo.toml (one `percolator` crate in the graph).
+percolator = { git = "https://github.com/Augustas11/percolator", rev = "b77519352e0d42ea2e4ce1d8806a7078cb42eed4" }
+solana-sdk = "1.18"
+solana-client = "1.18"
+spl-token = { version = "4.0", features = ["no-entrypoint"] }
+spl-associated-token-account = { version = "2.0", features = ["no-entrypoint"] }
+anyhow = "1"
+# Day-0 launch (launch.rs): config, state file, unsigned multisig txs.
+# All already in the graph through solana-client.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.5"
+bincode = "1.3"
+# Reuse the websocket/TLS and timestamp crates already in solana-client's graph.
+tungstenite = { version = "0.20.1", features = ["rustls-tls-webpki-roots"] }
+# FLOP index reads (pusher/flop.rs); same reqwest as solana-client's graph.
+reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+# The OpenRouter mark rule, shared with the scorer (flop-index/).
+flop-index = { path = "../flop-index" }
+chrono = { version = "0.4", default-features = false, features = ["std"] }

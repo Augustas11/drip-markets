@@ -1,0 +1,36 @@
+[package]
+name = "flop-index"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/Augustas11/drip-markets"
+publish = false
+
+# The FLOP perp's OpenRouter mark rule (lib, used by staging's pusher) and
+# its scorer (bin flop-score, docs/flop-compute/SCORER.md). Kept out of
+# staging so the scorer builds in seconds, without the Solana graph.
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+# Exact f64 round-trip: index-state.json must reload to the same bits.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.10"
+# Rules supplied as WebAssembly (src/score/wasm.rs): an interpreter, with
+# NaN canonicalisation ("deterministic") and no WAT parser.
+wasmi = { version = "2", default-features = false, features = ["std", "validate", "deterministic"] }
+# The version wasmi uses; reads a module before it is loaded.
+wasmparser = { version = "0.228", default-features = false, features = ["std"] }
+
+[[bin]]
+name = "flop-score"
+path = "src/bin/flop-score.rs"
+
+# Public JSON for the site's /compute page (docs/flop-compute/FEED.md).
+[[bin]]
+name = "flop-feed"
+path = "src/bin/flop-feed.rs"
+
+[dev-dependencies]
+# Only to check SPEC against launch/flop-compute.toml in CI (staging's own
+# test does the same but staging is not built in CI).
+toml = "0.5"

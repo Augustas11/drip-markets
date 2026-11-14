@@ -1,0 +1,34 @@
+{
+  "name": "drip-frontend",
+  "private": true,
+  "version": "0.0.0",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Augustas11/drip-markets.git",
+    "directory": "frontend"
+  },
+  "homepage": "https://github.com/Augustas11/drip-markets/tree/main/frontend#readme",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build && node scripts/route-shells.ts",
+    "test": "vitest run",
+    "preview": "vite preview",
+    "roundtrip": "vite build --ssr scripts/devnet-roundtrip.ts --outDir .roundtrip --emptyOutDir && node .roundtrip/devnet-roundtrip.js"
+  },
+  "dependencies": {
+    "@solana/web3.js": "1.98.4",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "jsdom": "30.1.2",
+    "typescript": "6.0.3",
+    "vite": "8.3.4",
+    "vitest": "5.0.3"
+  }
+}
