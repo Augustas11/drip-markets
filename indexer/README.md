@@ -48,6 +48,7 @@ Flags override environment variables. All flags take a separate value.
 | `--cors-origins` | `INDEXER_CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` |
 | `--leaderboard-exclude` | `INDEXER_LEADERBOARD_EXCLUDE` | Six devnet matcher/bot portfolio and owner pubkeys listed below |
 | `--start-slot` | `INDEXER_START_SLOT` | Unset (full history); use a fresh DB per season |
+| `--follow` | `INDEXER_FOLLOW` | The program (every transaction). A comma list of addresses, such as the market's LP and maker portfolios, ingests only the transactions that touch them: trades without the crank and mark-push traffic. Crank counts then stay at zero. Use a fresh DB when changing it |
 | `--poll-secs` | `INDEXER_POLL_SECS` | `10` |
 | `--rpc-delay-ms` | `INDEXER_RPC_DELAY_MS` | `250` |
 | `--cycle-secs` | `INDEXER_CYCLE_SECS` | `3` |

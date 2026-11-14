@@ -17,6 +17,10 @@ pub struct Config {
     pub rpc_url: String,
     pub program: Pubkey,
     pub market: Pubkey,
+    /// Addresses whose signatures are ingested. Default: the program (every
+    /// transaction). Following only the market's maker portfolios ingests the
+    /// trades and skips the crank and mark-push traffic.
+    pub follow: Vec<Pubkey>,
     pub db: PathBuf,
     pub bind: String,
     pub cors_origins: Vec<String>,
@@ -34,6 +38,7 @@ impl Config {
             ("rpc-url", "https://api.devnet.solana.com"),
             ("program-id", "GaXu3DXKYcMs8WmZsgfWcHXQSDva2qe7Aguvn3YHKSHS"),
             ("market", "HyMKxfct1S9aFtq21GG3FUYUViQkmpZdk5pwGRtAz48C"),
+            ("follow", ""),
             ("db", "indexer.sqlite"),
             ("bind", "127.0.0.1:8090"),
             (
@@ -71,10 +76,11 @@ impl Config {
         let get = |k: &str| values.get(k).unwrap().clone();
         let number =
             |k: &str| -> Result<u64> { get(k).parse().with_context(|| format!("invalid {k}")) };
-        let cfg = Self {
+        let mut cfg = Self {
             rpc_url: get("rpc-url"),
             program: Pubkey::from_str(&get("program-id"))?,
             market: Pubkey::from_str(&get("market"))?,
+            follow: parse_follow(&get("follow"))?,
             db: get("db").into(),
             bind: get("bind"),
             cors_origins: get("cors-origins")
@@ -110,8 +116,22 @@ impl Config {
             !cfg.cors_origins.iter().any(|o| o == "*"),
             "wildcard CORS is not supported"
         );
+        if cfg.follow.is_empty() {
+            cfg.follow.push(cfg.program);
+        }
         Ok((command, cfg))
     }
+}
+/// Comma-separated pubkeys, duplicates dropped, order kept.
+pub fn parse_follow(list: &str) -> Result<Vec<Pubkey>> {
+    let mut out: Vec<Pubkey> = Vec::new();
+    for s in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let key = Pubkey::from_str(s).context("invalid follow pubkey")?;
+        if !out.contains(&key) {
+            out.push(key);
+        }
+    }
+    Ok(out)
 }
 pub fn now() -> i64 {
     SystemTime::now()

@@ -44,9 +44,20 @@ fn retry<T>(rpc_url: &str, mut f: impl FnMut() -> Result<T>) -> Result<T> {
         }
     }
 }
+/// Meta key for a per-address cursor. The program keeps the original key names,
+/// so a database built by following the program reads unchanged.
+fn cursor_key(cfg: &Config, address: &Pubkey, base: &str) -> String {
+    if *address == cfg.program {
+        base.to_owned()
+    } else {
+        format!("{base}:{address}")
+    }
+}
+
 fn signatures(
     rpc: &RpcClient,
     cfg: &Config,
+    address: &Pubkey,
     before: Option<&str>,
     until: Option<&str>,
     min_context_slot: Option<u64>,
@@ -54,7 +65,7 @@ fn signatures(
     let result: Value = retry(&cfg.rpc_url, || {
         rpc.send(
             RpcRequest::GetSignaturesForAddress,
-            json!([cfg.program.to_string(),{
+            json!([address.to_string(),{
         "limit":1000,"before":before,"until":until,"commitment":"finalized","minContextSlot":min_context_slot} ]),
         )
         .map_err(Into::into)
@@ -124,17 +135,39 @@ fn commit(
     Ok(())
 }
 fn backfill(rpc: &RpcClient, c: &mut Connection, cfg: &Config) -> Result<()> {
-    let mut before = db::meta(c, "oldest_signature")?;
-    loop {
-        let mut page = signatures(rpc, cfg, before.as_deref(), None, None)?;
-        let newest = page.first().map(|s| s.0.clone());
-        let complete = season_page(&mut page, cfg.start_slot);
-        let rows = fetch(rpc, c, cfg, &page)?;
-        commit_backfill(c, &rows, &page, newest.as_deref(), complete)?;
-        if complete {
-            return Ok(());
+    for address in &cfg.follow {
+        let keys = BackfillKeys::new(cfg, address);
+        if db::meta(c, &keys.complete)?.as_deref() == Some("true") {
+            continue;
         }
-        before = page.last().map(|s| s.0.clone());
+        let mut before = db::meta(c, &keys.oldest)?;
+        loop {
+            let mut page = signatures(rpc, cfg, address, before.as_deref(), None, None)?;
+            let newest = page.first().map(|s| s.0.clone());
+            let complete = season_page(&mut page, cfg.start_slot);
+            let rows = fetch(rpc, c, cfg, &page)?;
+            commit_backfill(c, &keys, &rows, &page, newest.as_deref(), complete)?;
+            if complete {
+                break;
+            }
+            before = page.last().map(|s| s.0.clone());
+        }
+    }
+    // Health reads the plain key: set it once every followed address is done.
+    db::set_meta(c, "backfill_complete", "true")
+}
+struct BackfillKeys {
+    oldest: String,
+    newest: String,
+    complete: String,
+}
+impl BackfillKeys {
+    fn new(cfg: &Config, address: &Pubkey) -> Self {
+        Self {
+            oldest: cursor_key(cfg, address, "oldest_signature"),
+            newest: cursor_key(cfg, address, "newest_signature"),
+            complete: cursor_key(cfg, address, "backfill_complete"),
+        }
     }
 }
 fn season_page(page: &mut Vec<(String, u64)>, start_slot: Option<u64>) -> bool {
@@ -144,6 +177,7 @@ fn season_page(page: &mut Vec<(String, u64)>, start_slot: Option<u64>) -> bool {
 }
 fn commit_backfill(
     c: &mut Connection,
+    keys: &BackfillKeys,
     rows: &[decode::Decoded],
     page: &[(String, u64)],
     newest: Option<&str>,
@@ -154,40 +188,52 @@ fn commit_backfill(
         db::insert(&tx, row)?;
     }
     if let Some(oldest) = page.last() {
-        db::set_meta(&tx, "oldest_signature", &oldest.0)?;
+        db::set_meta(&tx, &keys.oldest, &oldest.0)?;
     }
     // Keep the tip even when the first page is entirely before the season, so
     // catch-up cannot re-import the discarded history on an empty season DB.
     if let Some(newest) = newest {
-        if db::meta(&tx, "newest_signature")?.is_none() {
-            db::set_meta(&tx, "newest_signature", newest)?;
+        if db::meta(&tx, &keys.newest)?.is_none() {
+            db::set_meta(&tx, &keys.newest, newest)?;
         }
     }
     if complete {
-        db::set_meta(&tx, "backfill_complete", "true")?;
+        db::set_meta(&tx, &keys.complete, "true")?;
     }
     tx.commit()?;
     Ok(())
 }
 
 fn catch_up(rpc: &RpcClient, c: &mut Connection, cfg: &Config, slot: u64) -> Result<()> {
-    let until = db::meta(c, "newest_signature")?;
-    let mut before = None;
-    let mut pages = Vec::new();
-    loop {
-        let page = signatures(rpc, cfg, before.as_deref(), until.as_deref(), Some(slot))?;
-        if page.is_empty() {
-            break;
+    for address in &cfg.follow {
+        let key = cursor_key(cfg, address, "newest_signature");
+        let until = db::meta(c, &key)?;
+        let mut before = None;
+        let mut pages = Vec::new();
+        loop {
+            let page = signatures(
+                rpc,
+                cfg,
+                address,
+                before.as_deref(),
+                until.as_deref(),
+                Some(slot),
+            )?;
+            if page.is_empty() {
+                break;
+            }
+            before = page.last().map(|s| s.0.clone());
+            pages.push(page);
         }
-        before = page.last().map(|s| s.0.clone());
-        pages.push(page);
+        commit_catch_up(c, cfg, &key, pages, |c, page| fetch(rpc, c, cfg, page))?;
     }
-    commit_catch_up(c, cfg, pages, |c, page| fetch(rpc, c, cfg, page))
+    Ok(())
 }
 
 fn commit_catch_up(
     c: &mut Connection,
     cfg: &Config,
+    newest_key: &str,
     pages: Vec<Vec<(String, u64)>>,
     mut fetch_page: impl FnMut(&Connection, &[(String, u64)]) -> Result<Vec<decode::Decoded>>,
 ) -> Result<()> {
@@ -198,7 +244,7 @@ fn commit_catch_up(
         season_page(&mut page, cfg.start_slot);
         let rows = fetch_page(c, &page)?;
         let cursor = if i + 1 == page_count {
-            newest.as_deref().map(|s| ("newest_signature", s))
+            newest.as_deref().map(|s| (newest_key, s))
         } else {
             None
         };
@@ -437,7 +483,7 @@ mod tests {
         ];
         assert!(season_page(&mut page, Some(10)));
         assert_eq!(page, vec![("new".into(), 11), ("boundary".into(), 10)]);
-        commit_backfill(&mut c, &[a, b], &page, Some("new"), true).unwrap();
+        commit_backfill(&mut c, &plain_keys(), &[a, b], &page, Some("new"), true).unwrap();
         assert!(db::contains(&c, "new").unwrap());
         assert!(db::contains(&c, "boundary").unwrap());
         assert!(!db::contains(&c, "old").unwrap());
@@ -460,7 +506,7 @@ mod tests {
         assert!(full.is_empty());
         assert!(season_page(&mut full, None));
         let mut c = db::open(std::path::Path::new(":memory:")).unwrap();
-        commit_backfill(&mut c, &[], &[], Some("preseason-tip"), true).unwrap();
+        commit_backfill(&mut c, &plain_keys(), &[], &[], Some("preseason-tip"), true).unwrap();
         assert_eq!(
             db::meta(&c, "newest_signature").unwrap().as_deref(),
             Some("preseason-tip")
@@ -472,7 +518,7 @@ mod tests {
         let mut c = db::open(std::path::Path::new(":memory:")).unwrap();
         let (_, mut cfg) = Config::parse(["serve".into()]).unwrap();
         cfg.start_slot = Some(10);
-        commit_backfill(&mut c, &[], &[], Some("startup"), true).unwrap();
+        commit_backfill(&mut c, &plain_keys(), &[], &[], Some("startup"), true).unwrap();
         for pages in [
             vec![vec![(String::from("still-before"), 9)]],
             vec![
@@ -481,7 +527,7 @@ mod tests {
             ],
         ] {
             let tip = pages[0][0].0.clone();
-            commit_catch_up(&mut c, &cfg, pages, |_, page| {
+            commit_catch_up(&mut c, &cfg, "newest_signature", pages, |_, page| {
                 assert!(page.iter().all(|(_, slot)| *slot >= 10));
                 Ok(page
                     .iter()
@@ -504,6 +550,79 @@ mod tests {
         );
         assert!(db::contains(&c, "new").unwrap());
         assert!(db::contains(&c, "boundary").unwrap());
+    }
+    fn plain_keys() -> BackfillKeys {
+        BackfillKeys {
+            oldest: "oldest_signature".into(),
+            newest: "newest_signature".into(),
+            complete: "backfill_complete".into(),
+        }
+    }
+    #[test]
+    fn follow_defaults_to_the_program_and_keeps_the_original_cursor_keys() {
+        let (_, cfg) = Config::parse(["serve".into()]).unwrap();
+        assert_eq!(cfg.follow, vec![cfg.program]);
+        let keys = BackfillKeys::new(&cfg, &cfg.program);
+        assert_eq!(keys.oldest, "oldest_signature");
+        assert_eq!(keys.newest, "newest_signature");
+        assert_eq!(keys.complete, "backfill_complete");
+    }
+    #[test]
+    fn each_followed_address_has_its_own_cursors() {
+        let (_, mut cfg) = Config::parse(["serve".into()]).unwrap();
+        let (a, b) = (Pubkey::new_unique(), Pubkey::new_unique());
+        cfg.follow = vec![a, b];
+        let (ka, kb) = (BackfillKeys::new(&cfg, &a), BackfillKeys::new(&cfg, &b));
+        assert_eq!(ka.newest, format!("newest_signature:{a}"));
+        assert_ne!(ka.oldest, kb.oldest);
+        let mut c = db::open(std::path::Path::new(":memory:")).unwrap();
+        let mut row = crate::decode::tests::fixture("crank");
+        row.signature = "a-tip".into();
+        row.slot = 20;
+        commit_backfill(
+            &mut c,
+            &ka,
+            &[row],
+            &[("a-tip".into(), 20)],
+            Some("a-tip"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(db::meta(&c, &ka.complete).unwrap().as_deref(), Some("true"));
+        assert_eq!(db::meta(&c, &kb.complete).unwrap(), None);
+        // The plain key is only set by backfill() once every address is done.
+        assert_eq!(db::meta(&c, "backfill_complete").unwrap(), None);
+        assert_eq!(db::meta(&c, &kb.newest).unwrap(), None);
+        commit_catch_up(
+            &mut c,
+            &cfg,
+            &kb.newest,
+            vec![vec![("b-tip".into(), 21)]],
+            |_, page| {
+                Ok(page
+                    .iter()
+                    .map(|(signature, slot)| {
+                        let mut row = crate::decode::tests::fixture("crank");
+                        row.signature = signature.clone();
+                        row.slot = *slot;
+                        row
+                    })
+                    .collect())
+            },
+        )
+        .unwrap();
+        assert_eq!(db::meta(&c, &kb.newest).unwrap().as_deref(), Some("b-tip"));
+        assert_eq!(db::meta(&c, &ka.newest).unwrap().as_deref(), Some("a-tip"));
+    }
+    #[test]
+    fn follow_parses_a_list_and_rejects_bad_keys() {
+        let (a, b) = (Pubkey::new_unique(), Pubkey::new_unique());
+        assert_eq!(
+            crate::parse_follow(&format!("{a}, {b},{a},")).unwrap(),
+            vec![a, b]
+        );
+        assert!(crate::parse_follow("").unwrap().is_empty());
+        assert!(crate::parse_follow("not-a-key").is_err());
     }
     #[test]
     fn page_rows_and_cursor_commit_together() {
