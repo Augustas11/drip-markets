@@ -5,6 +5,7 @@
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
+pub mod clamp3;
 pub mod feed;
 pub mod score;
 pub mod wide;

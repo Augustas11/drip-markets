@@ -21,6 +21,7 @@
 //! gateway prices.
 
 use super::*;
+use flop_index::clamp3::{self, Clamp3};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -31,12 +32,16 @@ use std::sync::{Arc, Mutex};
 type Cache = Arc<Mutex<Option<Result<Vec<Print>, String>>>>;
 /// The last good OpenRouter quote; `None` until the first successful fetch.
 type OrCache = Arc<Mutex<Option<OrQuote>>>;
+/// `or_mark_rule = "clamp3"` only: the rule's last step (when, and its mark
+/// in USD per 1M tokens; `None` while it holds). `None` until the first step.
+type RuleCache = Arc<Mutex<Option<(u64, Option<f64>)>>>;
 
 #[derive(Clone)]
 pub struct FlopIndex {
     cfg: launch::OracleCfg,
     cached: Cache,
     or: OrCache,
+    rule: RuleCache,
     /// What the last `latest()` mark was made from, for the signed push log.
     last_inputs: Option<serde_json::Value>,
 }
@@ -310,8 +315,59 @@ pub(super) fn fetch_or_text(client: &reqwest::blocking::Client, url: &str) -> Re
     Ok(client.get(url).send()?.error_for_status()?.text()?)
 }
 
-fn fetch_or(client: &reqwest::blocking::Client, o: &launch::OracleCfg, holder: &mut Holder) -> Result<OrQuote> {
-    held_quote(&parse_or(&fetch_or_text(client, &o.or_url)?)?, launch::now_ms(), o, holder)
+/// One fetch. Under clamp3 the rule steps on every reply, priced or not, as
+/// the recorder saves it, so the live steps continue a warm-start replay
+/// (exactly, while the pusher's fetches match the recorder's).
+fn fetch_or(client: &reqwest::blocking::Client, o: &launch::OracleCfg, holder: &mut Holder, rule: Option<(&mut Clamp3, &RuleCache)>) -> Result<OrQuote> {
+    let text = fetch_or_text(client, &o.or_url)?;
+    let now = launch::now_ms();
+    if let Some((r, cache)) = rule {
+        let first = r.last_at().is_none();
+        if let Some(mark) = rule_step(r, now, &o.or_url, &text) {
+            *cache.lock().unwrap_or_else(|p| p.into_inner()) = Some((now, mark));
+            if first {
+                log_allow_list(r, "first live step");
+            }
+        }
+    }
+    held_quote(&parse_or(&text)?, now, o, holder)
+}
+
+/// The model in an OpenRouter endpoints URL (`.../models/<model>/endpoints`).
+fn or_model(url: &str) -> Option<&str> {
+    url.split("/models/").nth(1)?.strip_suffix("/endpoints")
+}
+
+/// One clamp3 step on one reply, through the recorder's line and parser:
+/// the step's mark, or `None` (no step) for a reply with no priced row of the
+/// model, which a warm-start replay would not step on either.
+fn rule_step(rule: &mut Clamp3, at_ms: u64, url: &str, text: &str) -> Option<Option<f64>> {
+    let (snaps, _) = clamp3::recorder_snapshots(&[super::or_record::line(at_ms, url, text)], or_model(url)?);
+    let (at, eps, up) = snaps.into_iter().next()?;
+    Some(rule.step(at, &eps, &up))
+}
+
+/// Which `or_proven_at_start` names matched a provider up at the rule's first
+/// step (exact match after trimming whitespace), and which did not.
+fn log_allow_list(r: &Clamp3, at: &str) {
+    if let Some((hit, miss)) = r.allow_list_report() {
+        eprintln!("flop index: clamp3 allow-list at the {at}: matched {hit:?}, not matched {miss:?}");
+    }
+}
+
+/// The clamp3 mark: the last step, while it is fresh and gives a mark (none
+/// before a proven seller counts, or once none has for 15 minutes).
+fn rule_mark(r: Option<(u64, Option<f64>)>, now_ms: u64, o: &launch::OracleCfg) -> Result<(u64, u64)> {
+    let (at, mark) = r.context("clamp3: no step yet")?;
+    let age_s = now_ms.saturating_sub(at) / 1000;
+    if age_s > o.or_max_age_s {
+        bail!("clamp3 stale: last step {age_s} s ago, max {}", o.or_max_age_s);
+    }
+    let usd_e6 = (mark.context("clamp3 gives no mark: no proven seller counts, or none has for 15 minutes")? * 1e6).round();
+    if !(usd_e6 >= 1.0 && usd_e6 < u64::MAX as f64) {
+        bail!("clamp3: mark out of range");
+    }
+    Ok((usd_e6 as u64, at))
 }
 
 /// The quote for one fetched listing, with missing endpoints held at their
@@ -497,6 +553,32 @@ impl FlopIndex {
             "flop_standin" => {}
             other => bail!("flop_mark_source must be openrouter or flop_standin, not {other:?}"),
         }
+        let mut rule = match cfg.or_mark_rule.as_str() {
+            "spec" => {
+                if !cfg.or_proven_at_start.is_empty() || !cfg.or_warm_start_dir.is_empty() {
+                    bail!("or_proven_at_start and or_warm_start_dir are for or_mark_rule = \"clamp3\" only");
+                }
+                None
+            }
+            "clamp3" => {
+                if cfg.flop_mark_source != "openrouter" {
+                    bail!("or_mark_rule = \"clamp3\" needs flop_mark_source = \"openrouter\"");
+                }
+                // The rule counts in steps of the recorder's 5-minute fetch.
+                if cfg.or_refresh_s != clamp3::STEP_S {
+                    bail!("or_mark_rule = \"clamp3\" needs or_refresh_s = {} (its steps are 5-minute fetches), not {}", clamp3::STEP_S, cfg.or_refresh_s);
+                }
+                let model = or_model(&cfg.or_url).context("clamp3: or_url must end in /models/<model>/endpoints")?;
+                let mut r = Clamp3::with_allow_list(cfg.or_proven_at_start.iter().cloned());
+                if !cfg.or_warm_start_dir.is_empty() {
+                    let (n, skipped) = clamp3::warm_start(&mut r, std::path::Path::new(&cfg.or_warm_start_dir), model, launch::now_ms())?;
+                    eprintln!("flop index: clamp3 warm start: {n} snapshots of {model} from {} ({skipped} lines skipped), mark {:?}", cfg.or_warm_start_dir, r.last_mark());
+                    log_allow_list(&r, "first replayed snapshot");
+                }
+                Some(r)
+            }
+            other => bail!("or_mark_rule must be spec or clamp3, not {other:?}"),
+        };
         eprintln!(
             "flop index: USD per 1M tokens of the benchmark ({} GF/token); mark_source={}; {}:1 in:out; FLOP/USD STAND-IN {:.10}",
             cfg.flop_gn_per_mtok / 1_000_000, cfg.flop_mark_source, cfg.flop_blend_in_out, cfg.flop_usd_standin()
@@ -504,7 +586,9 @@ impl FlopIndex {
         let client = http_client()?;
         let cached: Cache = Arc::new(Mutex::new(None));
         let or: OrCache = Arc::new(Mutex::new(None));
-        let (writer, or_writer, o) = (Arc::clone(&cached), Arc::clone(&or), cfg.clone());
+        // A warm start that reached a mark can push before the first live step.
+        let rule_cache: RuleCache = Arc::new(Mutex::new(rule.as_ref().and_then(|r| Some((r.last_at()?, r.last_mark())))));
+        let (writer, or_writer, rule_writer, o) = (Arc::clone(&cached), Arc::clone(&or), Arc::clone(&rule_cache), cfg.clone());
         let mut models: Vec<Model> = Vec::new();
         let (mut models_at, mut or_at) = (None::<Instant>, None::<Instant>);
         let (mut last_table, mut last_status) = (String::new(), String::new());
@@ -523,7 +607,7 @@ impl FlopIndex {
             // quote, which `or_mark` ages out after or_max_age_s.
             if o.flop_mark_source == "openrouter" && or_at.is_none_or(|t: Instant| t.elapsed() >= Duration::from_secs(o.or_refresh_s)) {
                 or_at = Some(Instant::now());
-                match fetch_or(&client, &o, &mut holder) {
+                match fetch_or(&client, &o, &mut holder, rule.as_mut().map(|r| (r, &rule_writer))) {
                     Ok(q) => {
                         if let Some(line) = clamp_alert(&mut clamped, &q) {
                             eprintln!("{line}");
@@ -550,6 +634,7 @@ impl FlopIndex {
                 last_status = st;
             }
             let mark = match o.flop_mark_source.as_str() {
+                "openrouter" if rule.is_some() => rule_mark(*rule_writer.lock().unwrap_or_else(|p| p.into_inner()), now, &o).ok(),
                 "openrouter" => or_mark(or_now.as_ref(), now, &o).ok(),
                 _ => fetched.as_ref().ok().and_then(|p| index(p, now, &o).ok()),
             };
@@ -574,7 +659,7 @@ impl FlopIndex {
             drop(cache);
             std::thread::sleep(Duration::from_secs(o.flop_refresh_s));
         });
-        Ok(Self { cfg: cfg.clone(), cached, or, last_inputs: None })
+        Ok(Self { cfg: cfg.clone(), cached, or, rule: rule_cache, last_inputs: None })
     }
 
     pub fn latest(&mut self) -> Result<(u64, u64)> {
@@ -596,9 +681,12 @@ impl FlopIndex {
         let o = &self.cfg;
         let (mark, inputs) = if o.flop_mark_source == "openrouter" {
             let q = self.or.lock().unwrap_or_else(|p| p.into_inner()).clone();
-            let mark = or_mark(q.as_ref(), now, o)?;
+            // Under clamp3 the spec quote must be fresh too: the line logs it
+            // (spec_usd_e6, recomputable from the logged endpoints) beside
+            // the rule's mark, which needs the rule's history to recompute.
+            let spec = or_mark(q.as_ref(), now, o)?;
             let q = q.expect("or_mark checked");
-            (mark, serde_json::json!({
+            let mut inputs = serde_json::json!({
                 "source": "openrouter", "url": o.or_url, "fetched_ms": q.at_ms, "set": q.set,
                 "blend_in_out": o.flop_blend_in_out, "quantizations": o.or_quantizations,
                 "min_endpoints": o.or_min_endpoints, "weighting": o.or_weighting,
@@ -606,7 +694,20 @@ impl FlopIndex {
                 "clamp_min_endpoints": o.or_clamp_min_endpoints, "clamp": q.clamp, "used": q.used,
                 "hold_missing_s": o.or_hold_missing_s, "hold_confirm_s": o.or_hold_confirm_s, "held": q.held,
                 "endpoints": q.endpoints, "flop_side": side_json,
-            }))
+            });
+            let mark = if o.or_mark_rule == "clamp3" {
+                let r = *self.rule.lock().unwrap_or_else(|p| p.into_inner());
+                let mark = rule_mark(r, now, o)?;
+                let i = inputs.as_object_mut().expect("object");
+                i.insert("mark_rule".into(), "clamp3".into());
+                i.insert("rule_step_ms".into(), mark.1.into());
+                i.insert("proven_at_start".into(), o.or_proven_at_start.clone().into());
+                i.insert("spec_usd_e6".into(), spec.0.into());
+                mark
+            } else {
+                spec
+            };
+            (mark, inputs)
         } else {
             let side = side?;
             let mark = index_from(&side, o)?;
@@ -800,8 +901,14 @@ pub fn verify_push(line: &str, oracle: Option<&Pubkey>) -> Result<u64> {
             Some(g) => bail!("unknown guard {g}"),
         };
         let q = or_quote_with(&eps, 0, blend, &quants, min, weighting, frac, guard)?;
-        if q.usd_e6 != mark {
-            bail!("logged endpoints give {} but {mark} was pushed", q.usd_e6);
+        // A clamp3 mark needs the rule's history; the line's spec quote is checked.
+        let spec = match inputs.get("mark_rule").map(|r| r.as_str()) {
+            None => mark,
+            Some(Some("clamp3")) => inputs["spec_usd_e6"].as_u64().context("clamp3 line without spec_usd_e6")?,
+            Some(r) => bail!("unknown mark_rule {r:?}"),
+        };
+        if q.usd_e6 != spec {
+            bail!("logged endpoints give {} but {spec} was pushed", q.usd_e6);
         }
         if let Some(logged) = inputs["used"].as_array() {
             // Float tolerance: a logged f64 may parse back one ulp off.
@@ -837,6 +944,10 @@ fn rule_ok(line: &str, new_rule_seen: &mut bool) -> Result<()> {
     let inputs = &rec["inputs"];
     if inputs["source"] != "openrouter" {
         return Ok(());
+    }
+    // clamp3 is proposed, not shipped: its lines are not the shipped rule.
+    if let Some(r) = inputs.get("mark_rule") {
+        bail!("rule loosened or changed: mark_rule is {r}, the shipped rule is the spec quote");
     }
     if inputs.get("clamp_min_endpoints").is_some() {
         *new_rule_seen = true;
@@ -1804,5 +1915,144 @@ mod tests {
         odd["guard"] = "winsorize".into();
         let line = signed_push(&oracle, serde_json::json!({"mark_e6": q.usd_e6, "inputs": odd})).unwrap();
         assert!(verify_push(&line, Some(&oracle.pubkey())).unwrap_err().to_string().contains("unknown guard"));
+    }
+
+    #[test]
+    fn the_shipped_mark_rule_is_spec_and_clamp3_options_need_clamp3() {
+        let o = cfg();
+        assert_eq!((o.or_mark_rule.as_str(), o.or_proven_at_start.len(), o.or_warm_start_dir.as_str()), ("spec", 0, ""));
+        let err = |o: &launch::OracleCfg| match FlopIndex::new(o) {
+            Ok(_) => panic!("accepted"),
+            Err(e) => e.to_string(),
+        };
+        let mut bad = cfg();
+        bad.or_mark_rule = "median".into();
+        assert!(err(&bad).contains("or_mark_rule must be spec or clamp3"));
+        let mut bad = cfg();
+        bad.or_proven_at_start = vec!["DeepInfra".into()];
+        assert!(err(&bad).contains("clamp3\" only"));
+        let mut bad = cfg();
+        bad.or_warm_start_dir = "/nonexistent".into();
+        assert!(err(&bad).contains("clamp3\" only"));
+        let mut bad = cfg();
+        (bad.or_mark_rule, bad.flop_mark_source) = ("clamp3".into(), "flop_standin".into());
+        assert!(err(&bad).contains("needs flop_mark_source"));
+        let mut bad = cfg();
+        (bad.or_mark_rule, bad.or_warm_start_dir) = ("clamp3".into(), "/nonexistent-clamp3-warm-start".into());
+        assert!(err(&bad).contains("warm start: read"));
+        // clamp3 steps are 5-minute fetches: any other refresh is refused.
+        for s in [60, 299, 301, 600] {
+            let mut bad = cfg();
+            (bad.or_mark_rule, bad.or_refresh_s) = ("clamp3".into(), s);
+            assert!(err(&bad).contains("needs or_refresh_s = 300"), "{s}");
+        }
+    }
+
+    /// An OpenRouter reply for the benchmark: (provider, prompt, completion, status, uptime).
+    fn reply(rows: &[(&str, f64, f64, i64, f64)]) -> String {
+        let eps: Vec<_> = rows
+            .iter()
+            .map(|(p, i, o, s, u)| {
+                serde_json::json!({
+                    "provider_name": p, "quantization": "bf16", "tag": format!("{}/bf16", p.to_lowercase()),
+                    "model_id": "qwen/qwen3.8-27b", "status": s, "uptime_last_30m": u,
+                    "pricing": {"prompt": format!("{:.10}", i / 1e6), "completion": format!("{:.10}", o / 1e6)},
+                })
+            })
+            .collect();
+        serde_json::json!({"data": {"endpoints": eps}}).to_string()
+    }
+
+    #[test]
+    fn clamp3_live_steps_continue_the_warm_start_replay_on_the_same_fetches() {
+        let url = cfg().or_url;
+        let step = 300_000;
+        // 40 fetches: one seller cuts 30% at fetch 20, one goes down at 25,
+        // and fetch 12 is a busy page (no step live, nothing replayed).
+        let texts: Vec<String> = (0..40)
+            .map(|i| match i {
+                12 => "<html>busy</html>".into(),
+                _ => reply(&[
+                    ("DeepInfra", if i >= 20 { 0.105 } else { 0.15 }, if i >= 20 { 1.3125 } else { 1.875 }, 0, 100.0),
+                    ("GMICloud", 0.45, 3.2, if i >= 25 { 2 } else { 0 }, 99.0),
+                    ("Novita", 0.30, 2.4, 0, 100.0),
+                ]),
+            })
+            .collect();
+        let allow = || Clamp3::with_allow_list(["DeepInfra".to_string(), "GMICloud".into(), "Novita".into()]);
+        // All live.
+        let mut live = allow();
+        let marks: Vec<Option<Option<f64>>> = texts.iter().enumerate().map(|(i, t)| rule_step(&mut live, NOW + i as u64 * step, &url, t)).collect();
+        assert_eq!(marks[12], None);
+        assert!(marks.iter().enumerate().all(|(i, m)| i == 12 || m.is_some_and(|m| m.is_some_and(|m| m.is_finite() && m > 0.0))));
+        // The first 30 fetches recorded, the pusher restarts, warm starts, and goes on live.
+        let dir = std::env::temp_dir().join(format!("clamp3-warm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let rec: String = texts[..30].iter().enumerate().map(|(i, t)| super::super::or_record::line(NOW + i as u64 * step, &url, t)).collect();
+        std::fs::write(dir.join("2027-01-15.jsonl"), rec).unwrap();
+        let mut warm = allow();
+        let replayed = clamp3::warm_start(&mut warm, &dir, or_model(&url).unwrap(), NOW + 30 * step);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(replayed.unwrap(), (29, 0));
+        assert_eq!(warm.last_mark(), marks[29].unwrap());
+        for i in 30..40 {
+            assert_eq!(rule_step(&mut warm, NOW + i as u64 * step, &url, &texts[i]), marks[i]);
+        }
+        // The pusher's mark is the last step's, fresh, in USD per 1M e6.
+        let o = cfg();
+        let m = marks[39].unwrap().unwrap();
+        assert_eq!(rule_mark(Some((NOW, Some(m))), NOW + 1000, &o).unwrap(), ((m * 1e6).round() as u64, NOW));
+        assert!(rule_mark(None, NOW, &o).unwrap_err().to_string().contains("no step yet"));
+        assert!(rule_mark(Some((NOW, None)), NOW, &o).unwrap_err().to_string().contains("no mark"));
+        assert!(rule_mark(Some((NOW, Some(m))), NOW + (o.or_max_age_s + 1) * 1000, &o).unwrap_err().to_string().contains("stale"));
+    }
+
+    #[test]
+    fn clamp3_refuses_to_push_once_no_proven_seller_has_counted_for_15_minutes() {
+        let url = cfg().or_url;
+        let o = cfg();
+        let step = 300_000;
+        let up = reply(&[("DeepInfra", 0.15, 1.875, 0, 100.0), ("GMICloud", 0.45, 3.2, 0, 99.0), ("Novita", 0.30, 2.4, 0, 100.0)]);
+        let down = reply(&[("DeepInfra", 0.15, 1.875, 2, 0.0), ("GMICloud", 0.45, 3.2, 2, 0.0), ("Novita", 0.30, 2.4, 2, 0.0)]);
+        let mut r = Clamp3::with_allow_list(["DeepInfra".to_string(), "GMICloud".into(), "Novita".into()]);
+        let mut pushed = vec![];
+        for i in 0..40u64 {
+            let at = NOW + i * step;
+            let mark = rule_step(&mut r, at, &url, if (20..40).contains(&i) { &down } else { &up }).expect("a priced reply steps");
+            pushed.push(rule_mark(Some((at, mark)), at + 1000, &o).ok());
+        }
+        // Every seller down from fetch 20: they still count while up in most
+        // of the last hour, then the old mark is given for 10 minutes more,
+        // and from then on the pusher has nothing fresh to push.
+        let last = pushed.iter().rposition(Option::is_some).unwrap();
+        assert!(pushed[..=last].iter().all(Option::is_some) && pushed[last + 1..].iter().all(Option::is_none), "{pushed:?}");
+        assert_eq!(last, 27);
+        assert_eq!(pushed[27].unwrap().0, pushed[19].unwrap().0);
+        assert!(rule_mark(Some((NOW, r.last_mark())), NOW, &o).unwrap_err().to_string().contains("no mark"));
+    }
+
+    #[test]
+    fn a_clamp3_line_verifies_its_spec_quote_but_is_not_the_shipped_rule() {
+        let o = cfg();
+        let oracle = Keypair::new();
+        let q = or_quote(&[ep("DeepInfra", "bf16", 0.15, 1.875), ep("GMICloud", "bf16", 0.45, 3.2), ep("Novita", "bf16", 0.30, 2.4)], NOW, &o).unwrap();
+        let line = |spec: u64, rule: &str| {
+            let mut inputs = serde_json::json!({
+                "source": "openrouter", "set": q.set, "blend_in_out": o.flop_blend_in_out,
+                "quantizations": o.or_quantizations, "min_endpoints": o.or_min_endpoints, "weighting": o.or_weighting,
+                "min_frac_of_median": o.or_min_frac_of_median, "guard": "clamp", "clamp_min_endpoints": o.or_clamp_min_endpoints,
+                "clamp": q.clamp, "used": q.used, "endpoints": q.endpoints,
+                "mark_rule": rule, "spec_usd_e6": spec, "proven_at_start": [], "rule_step_ms": NOW,
+            });
+            inputs["hold_missing_s"] = o.or_hold_missing_s.into();
+            inputs["hold_confirm_s"] = o.or_hold_confirm_s.into();
+            signed_push(&oracle, serde_json::json!({"mark_e6": 250_000, "inputs": inputs})).unwrap()
+        };
+        // The rule's mark is pushed; the logged endpoints give the logged spec quote.
+        assert_eq!(verify_push(&line(q.usd_e6, "clamp3"), Some(&oracle.pubkey())).unwrap(), 250_000);
+        assert!(verify_push(&line(q.usd_e6 + 1, "clamp3"), Some(&oracle.pubkey())).unwrap_err().to_string().contains("logged endpoints give"));
+        assert!(verify_push(&line(q.usd_e6, "clamp9"), Some(&oracle.pubkey())).unwrap_err().to_string().contains("unknown mark_rule"));
+        // verify-push-log holds lines to the shipped rule: clamp3 is not it.
+        assert!(rule_ok(&line(q.usd_e6, "clamp3"), &mut false).unwrap_err().to_string().contains("mark_rule"));
     }
 }

@@ -206,6 +206,21 @@ pub struct OracleCfg {
     /// Only a price the endpoint has been seen up at for this long is held.
     #[serde(default = "default_or_hold_confirm_s")]
     pub or_hold_confirm_s: u64,
+    /// The settlement rule under `openrouter`: "spec" (the shipped rule) or
+    /// "clamp3" (flop_index::clamp3; proposed, off; SPEC.md "Settlement rule
+    /// clamp3"). Under clamp3 the line still logs the spec quote.
+    #[serde(default = "default_or_mark_rule")]
+    pub or_mark_rule: String,
+    /// clamp3 only: providers proven from the first step (default none).
+    /// Names match OpenRouter provider names exactly after trimming
+    /// whitespace; the pusher logs at start which matched a provider up at
+    /// the first step and which did not. clamp3 also needs or_refresh_s = 300.
+    #[serde(default)]
+    pub or_proven_at_start: Vec<String>,
+    /// clamp3 only: the price recorder's directory (`staging record-or`) to
+    /// replay before the first live step; empty is a cold start.
+    #[serde(default)]
+    pub or_warm_start_dir: String,
 }
 
 impl OracleCfg {
@@ -257,6 +272,7 @@ fn default_or_weighting() -> String { "inverse_square".into() }
 fn default_or_min_frac() -> f64 { 0.5 }
 fn default_or_clamp_min() -> usize { 3 }
 fn default_or_hold_confirm_s() -> u64 { 3600 }
+fn default_or_mark_rule() -> String { "spec".into() }
 
 /// InitMarket, field for field (`initial_price` is the mock start). TOML
 /// integers are i64, so u128 fields are read as u64.

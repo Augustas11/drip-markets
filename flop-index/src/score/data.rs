@@ -42,8 +42,8 @@ pub fn pin(dir: &Path, specs: &[String]) -> Result<String> {
         if !LOADERS.contains(&loader) {
             bail!("unknown loader {loader}; one of {LOADERS:?}");
         }
-        if file.contains('/') || file.contains(char::is_whitespace) {
-            bail!("{file}: a plain file name inside the folder, no spaces");
+        if !inside(file) {
+            bail!("{file}: a relative path inside the folder (sub-folders allowed, no '..'), no spaces");
         }
         let bytes = std::fs::read(dir.join(file)).with_context(|| format!("read {file}"))?;
         out.push_str(&format!("{} {loader} {file}\n", sha256_hex(&bytes)));
@@ -52,14 +52,42 @@ pub fn pin(dir: &Path, specs: &[String]) -> Result<String> {
     Ok(out)
 }
 
-pub const LOADERS: [&str; 3] = ["daily-csv", "changes-csv", "recorder-jsonl"];
+pub const LOADERS: [&str; 4] = ["daily-csv", "changes-csv", "recorder-jsonl", "wide-jsonl"];
 
 /// Read every pinned file in `dir`; fail if any hash differs. Returns the
 /// series and the MANIFEST's own sha256 (names the data in reports).
 pub fn load(dir: &Path) -> Result<(Vec<Series>, String)> {
-    let manifest = std::fs::read(dir.join("MANIFEST")).with_context(|| format!("no MANIFEST in {}", dir.display()))?;
+    let (files, manifest) = verified(dir)?;
     let mut groups: BTreeMap<String, BTreeMap<u64, Vec<OrEndpoint>>> = BTreeMap::new();
-    let mut files = 0;
+    for (loader, file, text) in &files {
+        match loader.as_str() {
+            "daily-csv" => daily_csv(text, &mut groups),
+            "changes-csv" => changes_csv(text, &mut groups),
+            "recorder-jsonl" => recorder_jsonl(text, &mut groups, "recorder"),
+            "wide-jsonl" => recorder_jsonl(text, &mut groups, "wide"),
+            other => bail!("unknown loader {other}"),
+        }
+        .with_context(|| format!("load {file}"))?;
+    }
+    Ok((into_series(groups), manifest))
+}
+
+/// A MANIFEST path: relative, inside the folder (sub-folders allowed, as in
+/// a multi-model recorder pin `<org>__<model>/<day>.jsonl`), no `..`, no
+/// hidden parts, no whitespace.
+fn inside(file: &str) -> bool {
+    !file.is_empty()
+        && !file.contains(char::is_whitespace)
+        && !file.contains('\\')
+        && file.split('/').all(|c| !c.is_empty() && !c.starts_with('.'))
+}
+
+/// Every pinned file in `dir` as (loader, file, text), each after its sha256
+/// matched; fails if any differs. Also the MANIFEST's own sha256.
+#[allow(clippy::type_complexity)]
+pub fn verified(dir: &Path) -> Result<(Vec<(String, String, String)>, String)> {
+    let manifest = std::fs::read(dir.join("MANIFEST")).with_context(|| format!("no MANIFEST in {}", dir.display()))?;
+    let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     for line in String::from_utf8(manifest.clone())?.lines() {
         let line = line.trim();
@@ -68,8 +96,11 @@ pub fn load(dir: &Path) -> Result<(Vec<Series>, String)> {
         }
         let f: Vec<&str> = line.split_whitespace().collect();
         let [sha, loader, file] = f[..] else { bail!("bad MANIFEST line {line:?}") };
-        if file.contains('/') {
-            bail!("MANIFEST names {file}: pinned files sit in the folder itself");
+        if !inside(file) {
+            bail!("MANIFEST names {file}: pinned files sit inside the folder");
+        }
+        if !LOADERS.contains(&loader) {
+            bail!("unknown loader {loader}");
         }
         if !seen.insert(file.to_owned()) {
             bail!("MANIFEST lists {file} twice");
@@ -80,19 +111,12 @@ pub fn load(dir: &Path) -> Result<(Vec<Series>, String)> {
             bail!("{file}: sha256 {got}, MANIFEST says {sha}");
         }
         let text = String::from_utf8(bytes).with_context(|| format!("{file}: not UTF-8"))?;
-        match loader {
-            "daily-csv" => daily_csv(&text, &mut groups),
-            "changes-csv" => changes_csv(&text, &mut groups),
-            "recorder-jsonl" => recorder_jsonl(&text, &mut groups),
-            other => bail!("unknown loader {other}"),
-        }
-        .with_context(|| format!("load {file}"))?;
-        files += 1;
+        out.push((loader.to_owned(), file.to_owned(), text));
     }
-    if files == 0 {
+    if out.is_empty() {
         bail!("MANIFEST lists no files");
     }
-    Ok((into_series(groups), sha256_hex(&manifest)))
+    Ok((out, sha256_hex(&manifest)))
 }
 
 /// Keep groups that ever list endpoints from 2+ providers.
@@ -242,8 +266,10 @@ fn opt(s: &str) -> Result<Option<f64>> {
 /// line per snapshot, `{at_ms, rows: [{model, provider, quantization,
 /// prompt, completion, status}] | null}`, prices USD per token (number or
 /// string). Group `recorder:<model>`. A null status counts as up, as in the
-/// pusher.
-fn recorder_jsonl(text: &str, groups: &mut BTreeMap<String, BTreeMap<u64, Vec<OrEndpoint>>>) -> Result<()> {
+/// pusher. The multi-model recorder (`wide-jsonl`, group `wide:<model>`)
+/// writes the same rows with the model once per line (`"model"`) and adds
+/// `tag`, `uptime_30m` and `context`, which only check v3 reads (v3.rs).
+fn recorder_jsonl(text: &str, groups: &mut BTreeMap<String, BTreeMap<u64, Vec<OrEndpoint>>>, prefix: &str) -> Result<()> {
     let num = |v: &serde_json::Value| v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()));
     for (n, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
@@ -257,7 +283,7 @@ fn recorder_jsonl(text: &str, groups: &mut BTreeMap<String, BTreeMap<u64, Vec<Or
         let url_model = v["url"].as_str().and_then(|u| u.split("/models/").nth(1)).and_then(|m| m.strip_suffix("/endpoints"));
         for r in rows {
             // Neither names the model: skip rather than mix models.
-            let Some(model) = r["model"].as_str().or(url_model) else { continue };
+            let Some(model) = r["model"].as_str().or(v["model"].as_str()).or(url_model) else { continue };
             let (Some(provider), Some(p), Some(c)) = (r["provider"].as_str(), num(&r["prompt"]), num(&r["completion"])) else {
                 continue;
             };
@@ -268,7 +294,7 @@ fn recorder_jsonl(text: &str, groups: &mut BTreeMap<String, BTreeMap<u64, Vec<Or
                 completion: c,
                 status: r["status"].as_i64().unwrap_or(0),
             };
-            groups.entry(format!("recorder:{model}")).or_default().entry(at).or_default().push(e);
+            groups.entry(format!("{prefix}:{model}")).or_default().entry(at).or_default().push(e);
         }
     }
     Ok(())
@@ -334,7 +360,7 @@ mod tests {
             "\n"
         );
         let mut g = BTreeMap::new();
-        recorder_jsonl(text, &mut g).unwrap();
+        recorder_jsonl(text, &mut g, "recorder").unwrap();
         let s = &g["recorder:qwen/qwen3.8-27b"];
         assert_eq!(s.len(), 1, "a failed fetch is no snapshot");
         let eps = &s[&1_794_355_200_000];
