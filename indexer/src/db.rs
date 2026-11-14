@@ -2,6 +2,7 @@ use crate::{decode::Decoded, stats, Config};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
+use solana_sdk::pubkey::Pubkey;
 use std::{collections::BTreeMap, path::Path, time::Duration};
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -66,10 +67,38 @@ pub fn check_start_slot(c: &Connection, start_slot: Option<u64>) -> Result<()> {
         );
     } else if let Some(slot) = start_slot {
         anyhow::ensure!(
-            meta(c, "oldest_signature")?.is_none(),
+            meta(c, "oldest_signature")?.is_none() && !has_history(c)?,
             "database already has ingested history; use a fresh DB for a new season"
         );
         set_meta(c, "start_slot", &slot.to_string())?;
+    }
+    Ok(())
+}
+
+fn has_history(c: &Connection) -> Result<bool> {
+    Ok(c.query_row("SELECT EXISTS(SELECT 1 FROM txs)", [], |r| r.get(0))?)
+}
+
+/// The followed address set is fixed per database: each address keeps its own
+/// cursors, so changing the set on an existing database would skip history.
+pub fn check_follow(c: &Connection, follow: &[Pubkey], default: bool) -> Result<()> {
+    let wanted = follow
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    match meta(c, "follow")? {
+        Some(existing) => anyhow::ensure!(
+            existing == wanted,
+            "database follow set differs from configuration; use a fresh DB"
+        ),
+        None => {
+            anyhow::ensure!(
+                default || (meta(c, "oldest_signature")?.is_none() && !has_history(c)?),
+                "database already has ingested history; use a fresh DB to change the follow set"
+            );
+            set_meta(c, "follow", &wanted)?;
+        }
     }
     Ok(())
 }

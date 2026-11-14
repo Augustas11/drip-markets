@@ -44,14 +44,51 @@ fn retry<T>(rpc_url: &str, mut f: impl FnMut() -> Result<T>) -> Result<T> {
         }
     }
 }
-/// Meta key for a per-address cursor. The program keeps the original key names,
-/// so a database built by following the program reads unchanged.
+/// Following the program (the default) sees every transaction and keeps the
+/// original meta key names, so existing databases read unchanged.
+fn follows_program(cfg: &Config) -> bool {
+    cfg.follow == [cfg.program]
+}
+
+/// Meta key for a per-address cursor: the plain name when following the program,
+/// suffixed with the address otherwise.
 fn cursor_key(cfg: &Config, address: &Pubkey, base: &str) -> String {
-    if *address == cfg.program {
+    if follows_program(cfg) {
         base.to_owned()
     } else {
         format!("{base}:{address}")
     }
+}
+
+/// Addresses ingested this pass. In follow mode, every portfolio seen in a fill
+/// joins the configured set, so its deposits and withdrawals (which never touch
+/// the LP or maker) are ingested too; a newly seen portfolio is backfilled from
+/// the season start on the next pass.
+fn followed(c: &Connection, cfg: &Config) -> Result<Vec<Pubkey>> {
+    let mut out = cfg.follow.clone();
+    if follows_program(cfg) {
+        return Ok(out);
+    }
+    let mut stmt = c.prepare(
+        "SELECT taker_portfolio FROM fills UNION SELECT maker_portfolio FROM fills ORDER BY 1",
+    )?;
+    for key in stmt.query_map([], |r| r.get::<_, Option<String>>(0))? {
+        if let Some(key) = key?.and_then(|k| k.parse::<Pubkey>().ok()) {
+            if !out.contains(&key) {
+                out.push(key);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn backfill_pending(c: &Connection, cfg: &Config, addresses: &[Pubkey]) -> Result<bool> {
+    for address in addresses {
+        if db::meta(c, &cursor_key(cfg, address, "backfill_complete"))?.as_deref() != Some("true") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn signatures(
@@ -134,8 +171,8 @@ fn commit(
     tx.commit()?;
     Ok(())
 }
-fn backfill(rpc: &RpcClient, c: &mut Connection, cfg: &Config) -> Result<()> {
-    for address in &cfg.follow {
+fn backfill(rpc: &RpcClient, c: &mut Connection, cfg: &Config, addresses: &[Pubkey]) -> Result<()> {
+    for address in addresses {
         let keys = BackfillKeys::new(cfg, address);
         if db::meta(c, &keys.complete)?.as_deref() == Some("true") {
             continue;
@@ -153,7 +190,7 @@ fn backfill(rpc: &RpcClient, c: &mut Connection, cfg: &Config) -> Result<()> {
             before = page.last().map(|s| s.0.clone());
         }
     }
-    // Health reads the plain key: set it once every followed address is done.
+    // Health reads the plain key: set once the first full backfill is done.
     db::set_meta(c, "backfill_complete", "true")
 }
 struct BackfillKeys {
@@ -204,8 +241,14 @@ fn commit_backfill(
     Ok(())
 }
 
-fn catch_up(rpc: &RpcClient, c: &mut Connection, cfg: &Config, slot: u64) -> Result<()> {
-    for address in &cfg.follow {
+fn catch_up(
+    rpc: &RpcClient,
+    c: &mut Connection,
+    cfg: &Config,
+    addresses: &[Pubkey],
+    slot: u64,
+) -> Result<()> {
+    for address in addresses {
         let key = cursor_key(cfg, address, "newest_signature");
         let until = db::meta(c, &key)?;
         let mut before = None;
@@ -384,13 +427,15 @@ pub fn pass(c: &mut Connection, cfg: &Config) -> Result<()> {
 }
 fn pass_inner(c: &mut Connection, cfg: &Config) -> Result<()> {
     db::check_start_slot(c, cfg.start_slot)?;
+    db::check_follow(c, &cfg.follow, follows_program(cfg))?;
     let rpc = RpcClient::new_with_timeout_and_commitment(
         cfg.rpc_url.clone(),
         Duration::from_secs(60),
         CommitmentConfig::finalized(),
     );
-    if db::meta(c, "backfill_complete")?.as_deref() != Some("true") {
-        backfill(&rpc, c, cfg)?;
+    let addresses = followed(c, cfg)?;
+    if backfill_pending(c, cfg, &addresses)? {
+        backfill(&rpc, c, cfg, &addresses)?;
     }
     // Capture state first, then ingest landed transactions through that point before
     // applying the liquidation exclusion query. RPC reads never submit transactions.
@@ -401,7 +446,7 @@ fn pass_inner(c: &mut Connection, cfg: &Config) -> Result<()> {
         .max()
         .unwrap_or(slot)
         .max(slot);
-    catch_up(&rpc, c, cfg, through_slot)?;
+    catch_up(&rpc, c, cfg, &addresses, through_slot)?;
     let tx = c.transaction()?;
     tx.execute("DELETE FROM current_portfolios", [])?;
     for s in &snapshots {
@@ -429,6 +474,7 @@ fn pass_inner(c: &mut Connection, cfg: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::params;
     #[test]
     fn permanent_errors_fail_without_retry_and_success_returns() {
         let mut attempts = 0;
@@ -613,6 +659,45 @@ mod tests {
         .unwrap();
         assert_eq!(db::meta(&c, &kb.newest).unwrap().as_deref(), Some("b-tip"));
         assert_eq!(db::meta(&c, &ka.newest).unwrap().as_deref(), Some("a-tip"));
+    }
+    #[test]
+    fn program_plus_others_never_shares_the_health_key() {
+        let (_, mut cfg) = Config::parse(["serve".into()]).unwrap();
+        let a = Pubkey::new_unique();
+        cfg.follow = vec![cfg.program, a];
+        let keys = BackfillKeys::new(&cfg, &cfg.program);
+        assert_eq!(keys.complete, format!("backfill_complete:{}", cfg.program));
+        let mut c = db::open(std::path::Path::new(":memory:")).unwrap();
+        commit_backfill(&mut c, &keys, &[], &[], Some("tip"), true).unwrap();
+        assert_eq!(db::meta(&c, "backfill_complete").unwrap(), None);
+        assert!(backfill_pending(&c, &cfg, &cfg.follow.clone()).unwrap());
+    }
+    #[test]
+    fn follow_mode_adds_every_portfolio_seen_in_a_fill() {
+        let (_, mut cfg) = Config::parse(["serve".into()]).unwrap();
+        let lp = Pubkey::new_unique();
+        let c = db::open(std::path::Path::new(":memory:")).unwrap();
+        assert_eq!(followed(&c, &cfg).unwrap(), vec![cfg.program]);
+        cfg.follow = vec![lp];
+        let taker = Pubkey::new_unique();
+        c.execute(
+            "INSERT INTO fills(signature,ix_index,leg,taker_portfolio,maker_portfolio) VALUES('s',0,0,?1,?2),('t',0,0,?1,'not-a-key')",
+            params![taker.to_string(), lp.to_string()],
+        )
+        .unwrap();
+        assert_eq!(followed(&c, &cfg).unwrap(), vec![lp, taker]);
+    }
+    #[test]
+    fn follow_set_is_fixed_per_database() {
+        let (a, b) = (Pubkey::new_unique(), Pubkey::new_unique());
+        let c = db::open(std::path::Path::new(":memory:")).unwrap();
+        db::check_follow(&c, &[a], false).unwrap();
+        db::check_follow(&c, &[a], false).unwrap();
+        assert!(db::check_follow(&c, &[a, b], false).is_err());
+        let c = db::open(std::path::Path::new(":memory:")).unwrap();
+        db::set_meta(&c, "oldest_signature", "old").unwrap();
+        assert!(db::check_follow(&c, &[a], false).is_err());
+        db::check_follow(&c, &[b], true).unwrap();
     }
     #[test]
     fn follow_parses_a_list_and_rejects_bad_keys() {
