@@ -73,7 +73,11 @@ fn followed(c: &Connection, cfg: &Config) -> Result<Vec<Pubkey>> {
         "SELECT taker_portfolio FROM fills UNION SELECT maker_portfolio FROM fills ORDER BY 1",
     )?;
     for key in stmt.query_map([], |r| r.get::<_, Option<String>>(0))? {
-        if let Some(key) = key?.and_then(|k| k.parse::<Pubkey>().ok()) {
+        let Some(key) = key? else { continue };
+        if cfg.leaderboard_exclude.contains(&key) {
+            continue;
+        }
+        if let Ok(key) = key.parse::<Pubkey>() {
             if !out.contains(&key) {
                 out.push(key);
             }
@@ -171,27 +175,64 @@ fn commit(
     tx.commit()?;
     Ok(())
 }
+/// Backfills every pending address. Following the program, an error stops the
+/// pass as before. In follow mode one address's failure (for example a pruned
+/// transaction in a new trader's old history) is logged and retried next pass,
+/// and the other addresses keep ingesting.
 fn backfill(rpc: &RpcClient, c: &mut Connection, cfg: &Config, addresses: &[Pubkey]) -> Result<()> {
+    let mut all_done = true;
     for address in addresses {
-        let keys = BackfillKeys::new(cfg, address);
-        if db::meta(c, &keys.complete)?.as_deref() == Some("true") {
-            continue;
-        }
-        let mut before = db::meta(c, &keys.oldest)?;
-        loop {
-            let mut page = signatures(rpc, cfg, address, before.as_deref(), None, None)?;
-            let newest = page.first().map(|s| s.0.clone());
-            let complete = season_page(&mut page, cfg.start_slot);
-            let rows = fetch(rpc, c, cfg, &page)?;
-            commit_backfill(c, &keys, &rows, &page, newest.as_deref(), complete)?;
-            if complete {
-                break;
+        match backfill_address(rpc, c, cfg, address) {
+            Ok(()) => {}
+            Err(e) if !follows_program(cfg) => {
+                all_done = false;
+                eprintln!(
+                    "backfill {address}: {}",
+                    crate::redact_rpc(&format!("{e:#}"), &cfg.rpc_url)
+                );
             }
-            before = page.last().map(|s| s.0.clone());
+            Err(e) => return Err(e),
         }
     }
-    // Health reads the plain key: set once the first full backfill is done.
-    db::set_meta(c, "backfill_complete", "true")
+    if all_done {
+        // Health reads the plain key: set once every address has been backfilled once.
+        db::set_meta(c, "backfill_complete", "true")?;
+    }
+    Ok(())
+}
+fn backfill_address(
+    rpc: &RpcClient,
+    c: &mut Connection,
+    cfg: &Config,
+    address: &Pubkey,
+) -> Result<()> {
+    let keys = BackfillKeys::new(cfg, address);
+    if db::meta(c, &keys.complete)?.as_deref() == Some("true") {
+        return Ok(());
+    }
+    let mut before = db::meta(c, &keys.oldest)?;
+    loop {
+        let mut page = signatures(rpc, cfg, address, before.as_deref(), None, None)?;
+        let newest = page.first().map(|s| s.0.clone());
+        let complete = season_page(&mut page, cfg.start_slot);
+        let rows = fetch(rpc, c, cfg, &page)?;
+        commit_backfill(c, &keys, &rows, &page, newest.as_deref(), complete)?;
+        if complete {
+            return Ok(());
+        }
+        before = page.last().map(|s| s.0.clone());
+    }
+}
+/// Addresses whose backfill is done: only these are caught up, so a pending
+/// address never pages its whole history without a cursor.
+fn backfilled(c: &Connection, cfg: &Config, addresses: &[Pubkey]) -> Result<Vec<Pubkey>> {
+    let mut out = Vec::new();
+    for address in addresses {
+        if db::meta(c, &cursor_key(cfg, address, "backfill_complete"))?.as_deref() == Some("true") {
+            out.push(*address);
+        }
+    }
+    Ok(out)
 }
 struct BackfillKeys {
     oldest: String,
@@ -446,7 +487,8 @@ fn pass_inner(c: &mut Connection, cfg: &Config) -> Result<()> {
         .max()
         .unwrap_or(slot)
         .max(slot);
-    catch_up(&rpc, c, cfg, &addresses, through_slot)?;
+    let ready = backfilled(c, cfg, &addresses)?;
+    catch_up(&rpc, c, cfg, &ready, through_slot)?;
     let tx = c.transaction()?;
     tx.execute("DELETE FROM current_portfolios", [])?;
     for s in &snapshots {
@@ -686,6 +728,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(followed(&c, &cfg).unwrap(), vec![lp, taker]);
+        cfg.leaderboard_exclude = vec![taker.to_string()];
+        assert_eq!(followed(&c, &cfg).unwrap(), vec![lp]);
+    }
+    #[test]
+    fn only_backfilled_addresses_are_caught_up() {
+        let (_, mut cfg) = Config::parse(["serve".into()]).unwrap();
+        let (a, b) = (Pubkey::new_unique(), Pubkey::new_unique());
+        cfg.follow = vec![a, b];
+        let mut c = db::open(std::path::Path::new(":memory:")).unwrap();
+        commit_backfill(
+            &mut c,
+            &BackfillKeys::new(&cfg, &a),
+            &[],
+            &[],
+            Some("tip"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(backfilled(&c, &cfg, &[a, b]).unwrap(), vec![a]);
+        assert!(backfill_pending(&c, &cfg, &[a, b]).unwrap());
+        assert!(!backfill_pending(&c, &cfg, &[a]).unwrap());
     }
     #[test]
     fn follow_set_is_fixed_per_database() {
