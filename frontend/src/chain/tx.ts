@@ -18,18 +18,26 @@ export async function findPortfolio(conn: Connection, programId: PublicKey, mark
   return accounts[0]?.pubkey ?? null;
 }
 
-export async function positionedPortfolios(conn: Connection, programId: PublicKey, market: { marketGroupId: Uint8Array }): Promise<PublicKey[]> {
-  const accounts = await conn.getProgramAccounts(programId, { filters: [
+async function marketPortfolios(conn: Connection, programId: PublicKey, market: { marketGroupId: Uint8Array }) {
+  return conn.getProgramAccounts(programId, { filters: [
     { dataSize: layout.PORTFOLIO_ACCOUNT_LEN },
     { memcmp: { offset: layout.HEADER_LEN + layout["pf.provenance_header"], bytes: new PublicKey(market.marketGroupId).toBase58() } },
   ] });
-  return accounts.filter(({ account }) => parsePortfolio(account.data).legs.some(leg => leg.assetIndex === 0 && leg.basisPosQ !== 0n))
-    .map(({ pubkey }) => pubkey);
 }
 
+const isPositioned = (data: Uint8Array) => parsePortfolio(data).legs.some(leg => leg.assetIndex === 0 && leg.basisPosQ !== 0n);
+
+export async function positionedPortfolios(conn: Connection, programId: PublicKey, market: { marketGroupId: Uint8Array }): Promise<PublicKey[]> {
+  return (await marketPortfolios(conn, programId, market)).filter(({ account }) => isPositioned(account.data)).map(({ pubkey }) => pubkey);
+}
+
+/// Simulates one crank per portfolio after the cranks already kept and keeps those that pass.
+/// Given `before` (portfolio data by base58 key), a crank is kept only if it also changes its
+/// portfolio: one that passes only by advancing the market clock is a no-op once a keeper cranks
+/// in the same slot, and the wrapper then fails the whole transaction with EngineNonProgress.
 export async function withFreshCrank(
   conn: Connection, payer: PublicKey, programId: PublicKey, market: PublicKey,
-  portfolios: PublicKey[], readAccounts: PublicKey[],
+  portfolios: PublicKey[], readAccounts: PublicKey[], before?: Map<string, Uint8Array>,
 ): Promise<{ ixs: TransactionInstruction[]; accounts: Uint8Array[] }> {
   const kept: TransactionInstruction[] = [];
   const budget = computeBudgetIxs();
@@ -42,8 +50,12 @@ export async function withFreshCrank(
     const tx = new VersionedTransaction(new TransactionMessage({
       payerKey: payer, recentBlockhash: blockhash, instructions: [...budget, ...kept, crank],
     }).compileToV0Message());
-    const result = await conn.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: true });
-    if (!result.value.err) kept.push(crank);
+    const result = await conn.simulateTransaction(tx, { sigVerify: false, replaceRecentBlockhash: true,
+      ...(before ? { accounts: { encoding: "base64" as const, addresses: [portfolio.toBase58()] } } : {}) });
+    if (result.value.err) continue;
+    const prior = before?.get(portfolio.toBase58()), after = result.value.accounts?.[0];
+    if (prior && after && Buffer.from(after.data[0], "base64").equals(Buffer.from(prior))) continue;
+    kept.push(crank);
   }
   const ixs = [...budget, ...kept];
   if (!kept.length) {
@@ -75,13 +87,17 @@ async function readPortfolio(conn: Connection, portfolio: PublicKey) {
   return parsePortfolio(account.data);
 }
 
-async function crankSet(conn: Connection, cfg: DevnetConfig, first: PublicKey[]) {
+async function crankSet(conn: Connection, cfg: DevnetConfig, first: PublicKey[], exclude: PublicKey[] = []) {
   const marketAccount = await conn.getAccountInfo(cfg.market);
   if (!marketAccount) throw new Error("Market account not found");
-  const positioned = await positionedPortfolios(conn, cfg.programId, parseMarket(marketAccount.data));
-  const portfolios = [...new Set([...first, ...positioned].map(key => key.toBase58()))].map(key => new PublicKey(key));
+  const market = parseMarket(marketAccount.data);
+  const all = await marketPortfolios(conn, cfg.programId, market);
+  const skip = new Set(exclude.map(key => key.toBase58()));
+  const positioned = all.filter(({ account }) => isPositioned(account.data)).map(({ pubkey }) => pubkey);
+  const portfolios = [...new Set([...first, ...positioned].map(key => key.toBase58()))]
+    .filter(key => !skip.has(key)).map(key => new PublicKey(key));
   if (portfolios.length > MAX_CRANKS) throw new Error(`${portfolios.length} portfolios need a market refresh; more than ${MAX_CRANKS} fit in one transaction`);
-  return portfolios;
+  return { portfolios, market, before: new Map(all.map(({ pubkey, account }) => [pubkey.toBase58(), account.data])) };
 }
 
 export async function buildDeposit(conn: Connection, cfg: DevnetConfig, owner: PublicKey, portfolio: PublicKey, amountAtoms: bigint) {
@@ -92,7 +108,7 @@ export async function buildDeposit(conn: Connection, cfg: DevnetConfig, owner: P
 }
 
 export async function buildWithdraw(conn: Connection, cfg: DevnetConfig, owner: PublicKey, portfolio: PublicKey, amountAtoms: bigint) {
-  const portfolios = await crankSet(conn, cfg, [portfolio]);
+  const { portfolios } = await crankSet(conn, cfg, [portfolio]);
   const { ixs, accounts } = await withFreshCrank(conn, owner, cfg.programId, cfg.market, portfolios, [portfolio]);
   const pf = parsePortfolio(accounts[0]);
   return [...ixs, withdrawIx(cfg.programId, owner, cfg.market, portfolio,
@@ -128,9 +144,22 @@ async function buildTradeIxs(
   feeBps: bigint,
 ) {
   if (!cfg.matcherProgram || !cfg.matcherContext) throw new Error("Trading is waiting on the matcher program (devnet PoC)");
-  const portfolios = await crankSet(conn, cfg, [portfolio, cfg.lpPortfolio]);
-  const { ixs, accounts } = await withFreshCrank(conn, owner, cfg.programId, cfg.market,
-    portfolios, [portfolio, cfg.lpPortfolio, cfg.market]);
+  // TradeCpi settles its own two portfolios before the fill (engine v16.rs
+  // execute_batch_with_fee_after_tail_validation_not_atomic), so the LP is never cranked: it trades
+  // with every agent, so its crank was the likeliest to land as a no-op. The other positioned
+  // portfolios are cranked when stale, since a risk-increasing fill fails EngineLockActive while
+  // any is stale after a mark or funding move (trade_preflight_risk_gate). The taker's crank is
+  // simulated last so the order is sized from its settled state, but sent only when no other crank
+  // runs and it walks the mark to a pushed oracle target, which the same gate also requires.
+  const { portfolios: others, market: prior, before } = await crankSet(conn, cfg, [], [portfolio, cfg.lpPortfolio]);
+  before.delete(portfolio.toBase58()); // a flat taker's crank changes no portfolio but may still walk the mark
+  const fresh = await withFreshCrank(conn, owner, cfg.programId, cfg.market,
+    [...others, portfolio], [portfolio, cfg.lpPortfolio, cfg.market], before);
+  const { accounts } = fresh;
+  let { ixs } = fresh;
+  const cranks = ixs.length - computeBudgetIxs().length;
+  if (cranks && ixs.at(-1)!.keys[2].pubkey.equals(portfolio)
+    && (cranks > 1 || parseMarket(accounts[2]).asset0.effectivePrice === prior.asset0.effectivePrice)) ixs = ixs.slice(0, -1);
   const a = parsePortfolio(accounts[0]), b = parsePortfolio(accounts[1]);
   const market = parseMarket(accounts[2]);
   const { sizeQ, limitPrice } = order(a, market);
