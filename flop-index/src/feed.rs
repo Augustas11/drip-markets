@@ -323,6 +323,8 @@ pub fn latest_json(line: &Value, now_ms: u64) -> Value {
         "source": inputs["source"],
         "set": inputs["set"],
         "clamp": inputs["clamp"],
+        "mark_rule": inputs["mark_rule"].as_str(),
+        "spec_usd": inputs["spec_usd_e6"].as_u64().map(usd),
         "blend_in_out": blend,
         "pricing_set": pricing_set,
         "sellers": sellers,
@@ -513,6 +515,26 @@ mod tests {
         assert_eq!(l["flop_side"]["miners"], 34);
         assert_eq!(l["flop_side"]["gateway_share"], 0.497988483079593);
         assert_eq!(l["flop_side"]["stale"], Value::Null);
+    }
+
+    #[test]
+    fn latest_passes_the_mark_rule_and_spec_price_through() {
+        let mut v: Value = serde_json::from_str(&push(NOW, 303_551)).unwrap();
+        // The default rule logs neither field.
+        let l = latest_json(&v, NOW);
+        assert_eq!((&l["mark_rule"], &l["spec_usd"]), (&Value::Null, &Value::Null));
+        v["inputs"]["mark_rule"] = json!("clamp3");
+        v["inputs"]["spec_usd_e6"] = json!(310_000);
+        let l = latest_json(&v, NOW);
+        assert_eq!((l["mark_rule"].as_str(), l["spec_usd"].as_f64()), (Some("clamp3"), Some(0.31)));
+        assert_eq!(l["mark_usd"], 0.303551);
+        // Odd values become null, never an error.
+        for (rule, spec) in [(json!(7), json!("x")), (json!(null), json!(-1.5)), (json!(["clamp3"]), json!(0.31)), (json!({}), json!(null))] {
+            v["inputs"]["mark_rule"] = rule;
+            v["inputs"]["spec_usd_e6"] = spec;
+            let l = latest_json(&v, NOW);
+            assert_eq!((&l["mark_rule"], &l["spec_usd"]), (&Value::Null, &Value::Null));
+        }
     }
 
     #[test]
