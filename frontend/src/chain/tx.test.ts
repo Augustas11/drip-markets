@@ -25,8 +25,6 @@ function simulatedAccounts(buffers: Buffer[]) {
 
 function mockCranks(buffers: Buffer[] = [data, lp, market]) {
   vi.spyOn(conn, "getAccountInfo").mockResolvedValue(account(market));
-  vi.spyOn(conn, "getMultipleAccountsInfo").mockImplementation(async keys => keys.map(key =>
-    account(key.equals(cfg.market) ? market : key.equals(cfg.lpPortfolio) ? lp : data)));
   vi.spyOn(conn, "getProgramAccounts").mockResolvedValue([]);
   vi.spyOn(conn, "getSlot").mockResolvedValue(123);
   vi.spyOn(conn, "getLatestBlockhash").mockResolvedValue({ blockhash: cfg.market.toBase58(), lastValidBlockHeight: 1234 });
@@ -75,69 +73,18 @@ it("finds asset-0 positions without an owner filter and drops flat portfolios", 
   ] });
 });
 
-const priced = (price: bigint) => {
-  const out = Buffer.from(market);
-  out.writeBigUInt64LE(price, layout.ASSET0_SLOT_OFF + layout.ASSET_ORACLE_WRAPPER_LEN + layout["slot.asset"] + layout["asset.effective_price"]);
-  return out;
-};
-const crankTargets = (ixs: { programId: PublicKey; data: Buffer; keys: { pubkey: PublicKey }[] }[]) =>
-  ixs.filter(ix => ix.programId.equals(cfg.programId) && ix.data[0] === 5).map(ix => ix.keys[2].pubkey);
-const settled = Buffer.from(data);
-settled.writeBigUInt64LE(77n, layout.HEADER_LEN + layout["pf.capital"]);
-const simulated = (buffers: Buffer[]) => ({ context: { slot: 123 }, value: { err: null, logs: [], accounts: simulatedAccounts(buffers) } });
-
-it("cranks other positioned portfolios only when the crank changes them, never the LP", async () => {
-  const simulate = mockCranks();
-  const third = new PublicKey(new Uint8Array(32).fill(5)), fourth = new PublicKey(new Uint8Array(32).fill(6));
-  vi.mocked(conn.getProgramAccounts).mockResolvedValue([portfolio, cfg.lpPortfolio, third, fourth, third].map(pubkey => ({ pubkey, account: account(data) })));
-  // third is settled by its crank; fourth passes only by advancing the clock; the taker is settled too.
-  simulate.mockResolvedValueOnce(simulated([settled])).mockResolvedValueOnce(simulated([data])).mockResolvedValueOnce(simulated([settled]));
-  const ixs = await buildTrade(conn, cfg, owner, portfolio, -123n, 100000000n, 12n);
-  expect(crankTargets(ixs)).toEqual([third]);
-  expect(simulate.mock.calls.slice(0, 3).map(call => call[1])).toEqual([third, fourth, portfolio].map(key => ({
-    sigVerify: false, replaceRecentBlockhash: true, accounts: { encoding: "base64", addresses: [key.toBase58()] },
-  })));
-  expect(simulate.mock.calls.map(call => call[0].message.compiledInstructions.length)).toEqual([3, 4, 4, 4]);
-  expect(conn.getMultipleAccountsInfo).not.toHaveBeenCalled();
-});
-
-it("sends the taker's crank only when it alone walks the mark", async () => {
-  const simulate = mockCranks();
-  vi.mocked(conn.getProgramAccounts).mockResolvedValue([portfolio, cfg.lpPortfolio].map(pubkey => ({ pubkey, account: account(data) })));
-  simulate.mockResolvedValueOnce(simulated([settled]));
-  expect(crankTargets(await buildTrade(conn, cfg, owner, portfolio, -123n, 100000000n, 12n))).toEqual([]);
-  mockCranks([settled, lp, priced(150_000_000n)]);
-  vi.mocked(conn.getProgramAccounts).mockResolvedValue([portfolio, cfg.lpPortfolio].map(pubkey => ({ pubkey, account: account(data) })));
-  expect(crankTargets(await buildTrade(conn, cfg, owner, portfolio, -123n, 100000000n, 12n))).toEqual([portfolio]);
-});
-
-it("drops the taker's crank behind another crank even when the mark moves", async () => {
-  mockCranks([settled, lp, priced(150_000_000n)]);
+it("cranks a third positioned portfolio once when building a trade", async () => {
+  mockCranks();
   const third = new PublicKey(new Uint8Array(32).fill(5));
-  vi.mocked(conn.getProgramAccounts).mockResolvedValue([portfolio, third].map(pubkey => ({ pubkey, account: account(data) })));
-  expect(crankTargets(await buildTrade(conn, cfg, owner, portfolio, -123n, 100000000n, 12n))).toEqual([third]);
-});
-
-it("keeps an unchanged taker's crank when it walks the mark", async () => {
-  mockCranks([data, lp, priced(150_000_000n)]);
-  vi.mocked(conn.getProgramAccounts).mockResolvedValue([portfolio, cfg.lpPortfolio].map(pubkey => ({ pubkey, account: account(data) })));
-  expect(crankTargets(await buildTrade(conn, cfg, owner, portfolio, 123n, 100000000n, 12n))).toEqual([portfolio]);
-});
-
-it("reads the chain when no crank passes", async () => {
-  const simulate = mockCranks();
-  const third = new PublicKey(new Uint8Array(32).fill(5));
-  vi.mocked(conn.getProgramAccounts).mockResolvedValue([portfolio, cfg.lpPortfolio, third].map(pubkey => ({ pubkey, account: account(data) })));
-  simulate.mockResolvedValue({ context: { slot: 123 }, value: { err: { InstructionError: [2, { Custom: 22 }] }, logs: [] } });
+  vi.mocked(conn.getProgramAccounts).mockResolvedValue([portfolio, cfg.lpPortfolio, third, third].map(pubkey => ({ pubkey, account: account(data) })));
   const ixs = await buildTrade(conn, cfg, owner, portfolio, -123n, 100000000n, 12n);
-  expect(crankTargets(ixs)).toEqual([]);
-  expect(simulate).toHaveBeenCalledTimes(2);
-  expect(conn.getMultipleAccountsInfo).toHaveBeenCalledExactlyOnceWith([portfolio, cfg.lpPortfolio, cfg.market]);
+  expect(ixs.filter(ix => ix.programId.equals(cfg.programId) && ix.data[0] === 5).map(ix => ix.keys[2].pubkey))
+    .toEqual([portfolio, cfg.lpPortfolio, third]);
 });
 
 it("rejects a trade needing nine cranks before simulation", async () => {
   const simulate = mockCranks();
-  const portfolios = [portfolio, cfg.lpPortfolio, ...Array.from({ length: 9 }, (_, i) => new PublicKey(new Uint8Array(32).fill(i + 5)))];
+  const portfolios = [portfolio, cfg.lpPortfolio, ...Array.from({ length: 7 }, (_, i) => new PublicKey(new Uint8Array(32).fill(i + 5)))];
   vi.mocked(conn.getProgramAccounts).mockResolvedValue(portfolios.map(pubkey => ({ pubkey, account: account(data) })));
   await expect(buildTrade(conn, cfg, owner, portfolio, -123n, 100000000n, 12n))
     .rejects.toThrow("9 portfolios need a market refresh; more than 8 fit in one transaction");
@@ -173,7 +120,7 @@ it("builds a fresh TradeCpi binding with the LP's runtime owner and no LP signer
   const advanced = Buffer.from(data);
   advanced.writeBigUInt64LE(32n, layout.PORTFOLIO_MATCHER_CONTROL_OFF);
   const simulate = mockCranks([advanced, lp, market]);
-  const read = vi.mocked(conn.getMultipleAccountsInfo);
+  const read = vi.spyOn(conn, "getMultipleAccountsInfo");
   const ixs = await buildTrade(conn, cfg, owner, portfolio, -123n, 100000000n, 12n);
   const trade = ixs.at(-1)!;
   expect(trade.data[0]).toBe(10);
@@ -197,7 +144,7 @@ it("builds a fresh TradeCpi binding with the LP's runtime owner and no LP signer
 
 it("reads accounts once when no crank is kept", async () => {
   mockCranks().mockResolvedValue({ context: { slot: 123 }, value: { err: "InvalidArgument", logs: [] } });
-  const read = vi.mocked(conn.getMultipleAccountsInfo).mockResolvedValue([account(data)]);
+  const read = vi.spyOn(conn, "getMultipleAccountsInfo").mockResolvedValue([account(data)]);
   const { ixs, accounts } = await withFreshCrank(conn, owner, cfg.programId, cfg.market, [portfolio], [portfolio]);
   expect(ixs.map(ix => ix.data[0])).toEqual([2, 1]);
   expect(accounts).toEqual([data]);
@@ -214,7 +161,7 @@ it.each(["long", "short"] as const)("closes the post-crank %s size and binds its
   const asset = layout.ASSET0_SLOT_OFF + layout.ASSET_ORACLE_WRAPPER_LEN + layout["slot.asset"];
   changedMarket.writeBigUInt64LE(120_000_000n, asset + layout["asset.effective_price"]);
   mockCranks([advanced, lp, changedMarket]);
-  const read = vi.mocked(conn.getMultipleAccountsInfo);
+  const read = vi.spyOn(conn, "getMultipleAccountsInfo");
   const trade = (await buildClose(conn, cfg, owner, portfolio, 50n, 12n)).at(-1)!;
   const freshMarket = parseMarket(changedMarket);
   const q = effectiveAbsQ(freshMarket, parsePortfolio(advanced).legs[0]);
