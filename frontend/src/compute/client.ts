@@ -18,6 +18,8 @@ export interface ComputeLatest {
   blend_in_out: number;
   /** The settlement rule the mark follows, e.g. "clamp3"; absent or "spec" for the pricing-set rule. */
   mark_rule?: string | null;
+  /** The old pricing-set rule's price beside the mark, USD per 1M tokens; absent or null when not logged. */
+  spec_usd?: number | null;
   pricing_set: PricingRow[];
   sellers: Seller[];
   flop_side: {

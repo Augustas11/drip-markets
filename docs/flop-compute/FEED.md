@@ -94,6 +94,8 @@ From the newest push line.
 | `market`, `oracle` | Market and oracle authority from the line |
 | `source` | `openrouter` (or `flop_standin`) |
 | `set`, `clamp` | Which set priced the mark and the clamp state, as logged |
+| `mark_rule` | The settlement rule behind the mark, e.g. `clamp3`, as logged; null when the line has none (the default `spec` rule) |
+| `spec_usd` | The old (`spec`) rule's price beside the mark, USD per 1M tokens (`spec_usd_e6` / 1e6); null when the line has none |
 | `blend_in_out` | Input:output token mix (15) |
 | `pricing_set[]` | Each endpoint used: `provider`, `quantization`, `listed`, `priced` (USD per 1M, blended), `up` |
 | `sellers[]` | Every priced endpoint in the push, cheapest first: `provider`, `quantization`, `blended` (USD per 1M at `blend_in_out`), `up` (OpenRouter status 0), `in_set`, `tier` (quantization is a pricing tier, bf16/fp16) |
