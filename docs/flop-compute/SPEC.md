@@ -263,6 +263,18 @@ first snapshot as proven.
 clamp3 $0.1785, about -0.53 log (-41%). Turning it on moves the mark that
 much at once, so it must be announced in advance.
 
+**Switch-over on 2026-11-15 (devnet COMPUTE-PERP).** The devnet pusher
+turns clamp3 on at about 03:00 UTC on 2026-11-15. At 00:40 UTC that day,
+replaying the recorder's history for `qwen/qwen3.8-27b` (2026-11-11 11:08
+UTC onward) through clamp3 gave a mark of about $0.157 per 1M tokens. The
+live rule read $0.3036, so the mark steps down about -0.66 log (-48%) at
+once. The step is larger than the -41% above because the market has moved
+since then. The allow-list (`or_proven_at_start`) is the 23 providers up in
+the first recorded snapshot. That matches the scorer's convention, and after
+3.5 days of history it changes the replayed mark by under 6%. The house agents
+close their positions before the switch and restart after the first clamp3
+push. To revert, set `or_mark_rule = "spec"` and restart the pusher.
+
 **Turning it on** (pusher config, `[oracle]`): `or_mark_rule = "clamp3"`,
 `or_refresh_s = 300`, `or_proven_at_start = ["DeepInfra", ...]`, and
 `or_warm_start_dir` set to the `staging record-or` directory, which is
