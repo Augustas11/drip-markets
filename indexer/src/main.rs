@@ -41,7 +41,7 @@ impl Config {
             ("program-id", "GaXu3DXKYcMs8WmZsgfWcHXQSDva2qe7Aguvn3YHKSHS"),
             ("market", "HyMKxfct1S9aFtq21GG3FUYUViQkmpZdk5pwGRtAz48C"),
             ("follow", ""),
-            ("max-follow", "64"),
+            ("max-follow", "16"),
             ("db", "indexer.sqlite"),
             ("bind", "127.0.0.1:8090"),
             (
