@@ -186,7 +186,6 @@
 .site .cx-more:hover { background: var(--site-accent-10); color: var(--site-accent); }
 .site .cx-moves { display: grid; gap: 26px; align-content: start; }
 .site .cx-col h3 { margin: 0; font: 400 12px var(--site-mono); letter-spacing: 1.5px; text-transform: uppercase; color: var(--site-muted); }
-.site .cx-col .cx-sub { margin-top: 4px; }
 .site .move-list { list-style: none; margin: 10px 0 0; padding: 0; }
 .site .move-list li { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto 64px; gap: 12px; align-items: center; margin: 0; padding: 10px 0; border-top: 1px solid var(--site-line-5); font-size: 14px; }
 .site .move-list li:first-child { border-top: 0; }

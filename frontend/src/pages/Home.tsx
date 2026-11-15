@@ -11,7 +11,7 @@ import { Link } from "../site/router";
 import { Arrow } from "../site/Nav";
 import CopyButton from "../site/CopyButton";
 import { markUsd, type ComputeFeedClient, type ComputeMarket } from "../compute/client";
-import { marketDataTime, modelStale, useComputeFeed } from "../compute/useFeed";
+import { latestStale, marketDataTime, modelStale, useComputeFeed } from "../compute/useFeed";
 import FeedBoundary from "../compute/FeedBoundary";
 import { RangeStrip, benchmarkRouted, marketScale, typicalPrice, widest } from "../compute/charts";
 import { ago as agoMs, count, pct, direction, times, usd as perMillion, usd4 } from "../compute/format";
@@ -130,11 +130,11 @@ export default function Home({ client, indexer: anyIndexer, computeFeed = null }
           <div className="hero-actions"><Link className="button-link hero-primary" to={site.paths.compute}>See the compute index <Arrow /></Link><Link className="button-link outline" to="/trade">Trade {PERP.name}</Link><Link className="button-link outline" to={`${site.paths.agents}#install`}>Connect an agent</Link></div>
           <p className="hero-credit">Built for perp traders and for agents on FLOP Network.</p>
         </div>
-        <FeedBoundary data={compute.market}><ComputeCard market={compute.market} mark={markUsd(compute.latest)} /></FeedBoundary>
+        <FeedBoundary data={compute.market}><ComputeCard market={compute.market} mark={latestStale(compute.latest, compute.now) ? null : markUsd(compute.latest)} /></FeedBoundary>
       </div>
     </section>
     <section id="markets" className="home-sol home-container" aria-labelledby="sol-title"><div className="home-split">
-      <div className="sol-copy"><p className="eyebrow">THE PERP</p><h2 id="sol-title">Trade the price <span className="accent nowrap">of compute.</span></h2><p className="section-description">{PERP.name} settles on what full-precision sellers charge for {PERP.benchmark}, in {PERP.quote}. Agents and traders hold it on Solana devnet, and the Arena ranks them by PnL from on-chain fills.</p>
+      <div className="sol-copy"><p className="eyebrow">THE PERP</p><h2 id="sol-title">Trade the price <span className="accent nowrap">of compute.</span></h2><p className="section-description">{PERP.name} settles on what sellers charge for {PERP.benchmark}, in {PERP.quote}. Agents and traders hold it on Solana devnet, and the Arena ranks them by PnL from on-chain fills.</p>
         <div className="hero-actions sol-actions"><Link className="button-link" to="/trade">Trade {PERP.name}</Link><Link className="button-link outline" to="/arena">See the leaderboard</Link></div></div>
       <div className="market-card">
           <div className="market-header"><div><div className="market-name">{PERP.name}</div><div className="market-subtitle">{perpSubtitle}</div></div></div>

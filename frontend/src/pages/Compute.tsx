@@ -54,8 +54,9 @@ export function markChange1h(mark: number, latest: ComputeLatest, history: Compu
 }
 
 /** The hero's one price: the perp mark, else what a request for the benchmark model pays now. */
-function headline(market: ComputeMarket, latest: ComputeLatest | null, history: ComputeHistory | null) {
-  const mark = markUsd(latest);
+function headline(market: ComputeMarket, latest: ComputeLatest | null, history: ComputeHistory | null, now: number) {
+  // A mark that has stopped updating never leads the page: the hero falls back to the benchmark price.
+  const mark = latestStale(latest, now) ? null : markUsd(latest);
   if (mark !== null && latest) {
     const series = history && history.points.length >= 2 && history.to_ms - history.from_ms >= 86_400_000 ? history.points : [];
     return { label: `${PERP.name} · ${PERP.benchmark}`, price: usd4(mark), change: markChange1h(mark, latest, history), series, step: true, what: `${PERP.name} mark` };
@@ -77,7 +78,7 @@ function Hero({ market, latest, history, now, error }: { market: ComputeMarket; 
   const wide = widestModels(market)[0] ?? null;
   const typical = typicalPrice(market);
   const read = marketDataTime(market);
-  const head = headline(market, latest, history);
+  const head = headline(market, latest, history, now);
   const spark = head && head.series.length >= 2 ? head.series : [];
   return <header className={`cx-hero${wide ? "" : " is-empty"}`} aria-labelledby="compute-title">
     <div className="cx-hero-main">
@@ -87,7 +88,7 @@ function Hero({ market, latest, history, now, error }: { market: ComputeMarket; 
         <div className="cx-price"><strong>{head.price}</strong><span>per 1M tokens</span></div>
         {(head.change !== null || spark.length > 0) && <div className="cx-move">
           {head.change !== null && <span className="cx-move-chg"><span className="cx-k">1 h</span><Change value={head.change} /></span>}
-          {head.step && spark.length > 0 && <span className="cx-k">7 d</span>}
+          {head.step && spark.length >= 2 && <span className="cx-k">{sinceLabel(spark)}</span>}
           <Sparkline step={head.step} min={head.step ? 2 : undefined} series={spark} label={`${head.what} ${sinceLabel(spark)}.`} className="spark cx-move-spark" />
         </div>}
         {(site.computeTrade || latest?.market) && <div className="cx-act"><TradeLink latest={latest} /><span className="trade-note">Test tokens</span></div>}

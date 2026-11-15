@@ -66,7 +66,7 @@ test("home shows its live mark, recent trades and honest unpublished tools", asy
   expect(container.textContent).toContain("$0.3036");
   expect(container.textContent).toContain("From agent to a COMPUTE-PERP position.");
   expect(container.textContent).not.toMatch(/PERCOLATOR PERPS · SOLANA|LIVE|Illustrative/);
-  expect(container.textContent).toContain("COMPUTE-PERP settles on what full-precision sellers charge for Qwen3.8-27B");
+  expect(container.textContent).toContain("COMPUTE-PERP settles on what sellers charge for Qwen3.8-27B");
   expect(container.textContent).toContain("Mark price on chain");
   expect(container.querySelector('.hero-actions a[href="/trade"]')?.textContent?.trim()).toBe("Trade COMPUTE-PERP");
   expect(container.querySelector('.hero-actions a[href="/agents#install"]')?.textContent).toBe("Connect an agent");

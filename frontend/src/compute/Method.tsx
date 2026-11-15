@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { ComputeLatest, ComputeMarket } from "./client";
+import { specRule, type ComputeLatest, type ComputeMarket } from "./client";
 import { count, day, txUrl } from "./format";
 import { PERP } from "../market/types";
 
@@ -28,6 +28,8 @@ export default function Method({ market, latest, openGroup }: { market: ComputeM
       <h2 id="compute-perp-heading">{PERP.name}</h2>
       <Faq q={`What does ${PERP.name} settle on?`} open={openGroup === "compute-perp"}>{fixedRate
         ? <>FLOP's on-chain price ({latest?.source ?? "unknown"}), converted to USD at a fixed rate.</>
+        : latest && !specRule(latest)
+        ? <>What a request pays across proven sellers: those with 24 hours of serving. Cheaper and more reliable sellers weigh more, up to 24% each. The price moves at most 1% per 5 minutes, plus any move most proven sellers make together.</>
         : <>bf16 sellers first; fewer than 2 up, fp16, then both. Weighted 1 ÷ price². With 3 or more, a quote under half the median counts as half.{latest && <> Clamp now: {latest.clamp ?? "unknown"}.</>}</>}</Faq>
       <Faq q="How can I check a settlement price?">Each settlement price is written to Solana{latest?.sig ? <> (<a href={txUrl(latest.sig)} target="_blank" rel="noreferrer">latest transaction</a>)</> : null}.</Faq>
     </section>

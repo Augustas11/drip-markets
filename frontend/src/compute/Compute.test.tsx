@@ -315,6 +315,8 @@ test("latest.json from the future or a stopped feed is stale", async () => {
   vi.spyOn(feed, "latest").mockResolvedValue({ ...base, generated_ms: old, landed_ms: old - 60_000 });
   let container = await render(feed);
   expect(container.querySelector('.compute-stale[title="The price feed has not updated for over 30 minutes."]')).not.toBeNull();
+  // A mark that stopped updating does not lead the page: the hero shows the benchmark price instead.
+  expect(container.querySelector(".cx-hero .cx-label")?.textContent).toContain("what a request pays");
   await cleanup?.();
   vi.spyOn(feed, "latest").mockResolvedValue({ ...base, landed_ms: base.generated_ms + 6 * 60_000 });
   container = await render(feed);
