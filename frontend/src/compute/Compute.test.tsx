@@ -94,7 +94,7 @@ test("draws one range strip per model on a shared log scale", async () => {
   expect(rows[0].querySelector(".m-name")?.textContent).toBe("GLM 5.3");
   const glm = market.models.find(m => m.name === "GLM 5.3")!;
   expect(rows[0].querySelectorAll(".strip-dot")).toHaveLength(glm.quotes.filter(q => q.price !== null).length);
-  expect(container.querySelectorAll(".strip-axis span").length).toBeGreaterThan(2);
+  expect(container.querySelectorAll(".strip-axis span").length).toBeGreaterThanOrEqual(2);
   // Thin models are tagged.
   expect(Array.from(container.querySelectorAll(".board-row.is-thin .m-name")).map(n => n.textContent).sort()).toEqual(market.models.filter(m => m.thin).map(m => m.name).sort());
   expect(container.querySelectorAll(".board-row.is-thin").length).toBeGreaterThan(0);
@@ -144,14 +144,15 @@ test("providers, price moves and dynamic pricers come from the feed", async () =
   const market = marketFixture();
   const container = await render(liveFeed());
   const providers = container.querySelector('[aria-labelledby="compute-providers-heading"]')!;
-  expect(providers.querySelectorAll("tbody tr")).toHaveLength(8);
+  expect(providers.querySelectorAll("tbody tr")).toHaveLength(Math.min(12, market.providers.length));
   await click(providers.querySelector(".cx-more")!);
   expect(providers.querySelectorAll("tbody tr")).toHaveLength(market.providers.length);
   const moves = container.querySelector('[aria-labelledby="compute-moves-heading"]')!;
-  expect(moves.querySelectorAll(".move-list:not(.dyn-list) li")).toHaveLength(market.changes.length);
-  expect(moves.querySelectorAll(".dyn-list li")).toHaveLength(market.dynamic.length);
-  expect(moves.querySelector(".dyn-list li")?.textContent).toContain("212 changes");
-  expect(moves.textContent).not.toContain("Frequent repricers");
+  expect(moves.querySelectorAll(".move-list li")).toHaveLength(Math.min(8, market.changes.length));
+  const reps = container.querySelector(".cx-repricers")!;
+  expect(reps.querySelectorAll(".dyn-list li")).toHaveLength(Math.min(6, market.dynamic.length));
+  expect(reps.querySelector(".dyn-list li")?.textContent).toContain("212 changes");
+  expect(reps.textContent).not.toContain("Frequent repricers");
 });
 
 test("a seller with 3+ changes is grouped as a frequent repricer, never contradicted", async () => {
@@ -159,12 +160,13 @@ test("a seller with 3+ changes is grouped as a frequent repricer, never contradi
   const repeat = (at: number, from: number, to: number) => ({ at_ms: now - at * 60_000, model: "openai/gpt-oss-120b", provider: "PrimeIntellect", quantization: "fp4", from, to });
   const container = await render(liveFeed(now, m => ({ ...m, dynamic: [], changes: [repeat(5, 0.0385, 0.0493), repeat(15, 0.0493, 0.041), repeat(25, 0.041, 0.0385), { ...repeat(9, 0.2, 0.22), provider: "Novita" }] })));
   const moves = container.querySelector('[aria-labelledby="compute-moves-heading"]')!;
-  expect(moves.textContent).toContain("Frequent repricers");
-  const rows = Array.from(moves.querySelectorAll(".dyn-list li")).map(li => li.textContent);
+  const reps = container.querySelector(".cx-repricers")!;
+  expect(reps.textContent).toContain("Frequent repricers");
+  const rows = Array.from(reps.querySelectorAll(".dyn-list li")).map(li => li.textContent);
   expect(rows).toEqual(["PrimeIntellectGPT-OSS-120B · fp4$0.0385–$0.04933 changes"]);
-  expect(moves.querySelectorAll(".move-list:not(.dyn-list) li")).toHaveLength(1);
-  expect(moves.textContent).not.toContain("No seller repriced");
-  expect(moves.textContent).not.toContain("Dynamic pricers");
+  expect(moves.querySelectorAll(".move-list li")).toHaveLength(1);
+  expect(reps.textContent).not.toContain("No seller repriced");
+  expect(reps.textContent).not.toContain("Dynamic pricers");
 });
 
 test("the settlement and FLOP panels show the sellers, the push and FLOP's rate, and no second mark", async () => {

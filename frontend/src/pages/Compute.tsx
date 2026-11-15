@@ -12,7 +12,8 @@ import "../site/compute.css";
 
 export { STALE_MS } from "../compute/useFeed";
 
-const PROVIDERS_SHOWN = 8;
+const PROVIDERS_SHOWN = 12;
+const MOVES_SHOWN = 6;
 type SortKey = "sellers" | "spread" | "median" | "paid" | "gn";
 const sorts: [SortKey, string][] = [["sellers", "Most sellers"], ["spread", "Widest spread"], ["median", "Highest median"], ["paid", "Paid now"], ["gn", "Per unit of compute"]];
 const CAPPED = "No seller counts for more than half.";
@@ -277,13 +278,14 @@ function Moves({ market }: { market: ComputeMarket }) {
   const names = new Map(market.models.map(m => [m.id, m.name]));
   const frequent = frequentRepricers(market.changes);
   const grouped = new Set(frequent.map(changeKey));
-  const changes = market.changes.filter(c => !grouped.has(changeKey(c))).sort((a, b) => b.at_ms - a.at_ms).slice(0, 12);
+  const changes = market.changes.filter(c => !grouped.has(changeKey(c))).sort((a, b) => b.at_ms - a.at_ms).slice(0, 8);
   const Row = ({ provider, model, quantization, min, max, n }: { provider: string; model: string; quantization: string; min: number; max: number; n: number }) => <li>
     <span className="mv-what"><b>{provider}</b><span>{names.get(model) ?? model} · {quantization}</span></span>
     <span className="mv-price">{usd(min)}–{usd(max)}</span>
     <span className="dyn-n"><b>{n}</b> changes</span>
   </li>;
-  return <section className="cx-section cx-moves" aria-labelledby="compute-moves-heading">
+  const twoCols = frequent.length > 0 && (market.dynamic.length > 0);
+  return <><section className="cx-section cx-moves" aria-labelledby="compute-moves-heading">
     <h2 id="compute-moves-heading">Price moves</h2>
     <div className="cx-col">
       <h3>Last price changes</h3>
@@ -297,18 +299,18 @@ function Moves({ market }: { market: ComputeMarket }) {
         </li>;
       })}</ol> : <p className="note">{frequent.length ? "No other seller has changed a price" : "No seller has changed a price"} since {when(market.window.from_ms)}.</p>}
     </div>
+  </section>
+  <section className={`cx-section cx-repricers${twoCols ? "" : " is-one"}`} aria-label="Sellers that reprice often">
     {frequent.length > 0 && <div className="cx-col">
-      <h3>Frequent repricers</h3>
-      <p className="cx-sub">3 or more price changes since {when(market.window.from_ms)}, and their range.</p>
-      <ol className="move-list dyn-list">{frequent.map(f => <Row key={changeKey(f)} {...f} n={f.changes} />)}</ol>
+      <h3>Frequent repricers · 3+ changes since {when(market.window.from_ms)}</h3>
+      <ol className="move-list dyn-list">{frequent.slice(0, MOVES_SHOWN).map(f => <Row key={changeKey(f)} {...f} n={f.changes} />)}</ol>
     </div>}
     {(market.dynamic.length > 0 || frequent.length === 0) && <div className="cx-col">
-      <h3>Dynamic pricers</h3>
-      <p className="cx-sub">Sellers with more than one price in the last 24 h, and their range.</p>
-      {market.dynamic.length ? <ol className="move-list dyn-list">{[...market.dynamic].sort((a, b) => b.changes_24h - a.changes_24h).map(d => <Row key={changeKey(d)} {...d} n={d.changes_24h} />)}</ol>
+      <h3>Dynamic pricers · last 24 h</h3>
+      {market.dynamic.length ? <ol className="move-list dyn-list">{[...market.dynamic].sort((a, b) => b.changes_24h - a.changes_24h).slice(0, MOVES_SHOWN).map(d => <Row key={changeKey(d)} {...d} n={d.changes_24h} />)}</ol>
         : <p className="note">No seller repriced more than once in 24 h.</p>}
     </div>}
-  </section>;
+  </section></>;
 }
 
 function Perp({ latest, history, now }: { latest: ComputeLatest; history: ComputeHistory | null; now: number }) {

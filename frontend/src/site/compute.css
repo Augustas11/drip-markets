@@ -174,6 +174,9 @@
 /* Providers + moves */
 .site .cx-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; align-items: start; }
 .site .cx-pair > section { margin: 0; }
+.site .cx-pair > .cx-repricers { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 48px; align-items: start; }
+.site .cx-pair > .cx-repricers.is-one { grid-template-columns: 1fr; }
+.site .cx-pair { align-items: stretch; }
 .site .providers-table td { font-family: var(--site-mono); }
 .site .bar-cell { display: inline-flex; align-items: center; justify-content: flex-end; gap: 10px; }
 .site .bar { display: inline-block; width: 64px; height: 6px; background: var(--site-white-4); border-radius: 3px; overflow: hidden; }
@@ -181,7 +184,7 @@
 .site .is-win { color: var(--site-accent); }
 .site .cx-more { margin-top: 14px; min-height: 38px; padding: 0 16px; background: none; border: 1px solid var(--site-accent-40); color: var(--site-accent); font-size: 14px; }
 .site .cx-more:hover { background: var(--site-accent-10); color: var(--site-accent); }
-.site .cx-moves { display: grid; gap: 26px; }
+.site .cx-moves { display: grid; gap: 26px; align-content: start; }
 .site .cx-col h3 { margin: 0; font: 400 12px var(--site-mono); letter-spacing: 1.5px; text-transform: uppercase; color: var(--site-muted); }
 .site .cx-col .cx-sub { margin-top: 4px; }
 .site .move-list { list-style: none; margin: 10px 0 0; padding: 0; }
@@ -198,7 +201,7 @@
 .site .dyn-n b { color: var(--site-accent); font-size: 14px; }
 
 /* Perp + FLOP panels */
-.site .cx-panels { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 24px; align-items: start; }
+.site .cx-panels { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 24px; align-items: stretch; }
 .site .cx-panel { display: flex; flex-direction: column; gap: 14px; padding: 28px; background: var(--site-surface-2); border: 1px solid var(--site-line-7); border-radius: 22px; }
 .site .cx-panel:first-child { border-color: var(--site-accent-25); background: linear-gradient(180deg, var(--site-forest-12), var(--site-surface-2) 60%); }
 .site .cx-panel h2 { margin: 0; font-size: 18px; }
@@ -332,3 +335,4 @@
   .site .cx-section:has(> .faq) > h2, .site .cx-section:has(> .faq) > .faq { grid-column: 1; grid-row: auto; }
   .site .cx-section:has(> .faq) > h2 { margin: 0 0 6px; }
 }
+@media (max-width: 1080px) { .site .cx-pair > .cx-repricers { grid-template-columns: 1fr; } }
