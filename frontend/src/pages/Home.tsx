@@ -10,7 +10,7 @@ import { site } from "../site/config";
 import { Link } from "../site/router";
 import { Arrow } from "../site/Nav";
 import CopyButton from "../site/CopyButton";
-import type { ComputeFeedClient, ComputeMarket } from "../compute/client";
+import { markUsd, type ComputeFeedClient, type ComputeMarket } from "../compute/client";
 import { marketDataTime, modelStale, useComputeFeed } from "../compute/useFeed";
 import FeedBoundary from "../compute/FeedBoundary";
 import { RangeStrip, benchmarkRouted, marketScale, typicalPrice, widest } from "../compute/charts";
@@ -48,30 +48,28 @@ function ago(time: number | null) {
   return `${amount}${unit} ago`;
 }
 
-function ComputeCard({ market, mark, markAgo, sellersUp, sellers }: { market: ComputeMarket | null; mark: number | null; markAgo: string | null; sellersUp: number; sellers: number }) {
+function ComputeCard({ market, mark }: { market: ComputeMarket | null; mark: number | null }) {
   const scale = market ? marketScale(market) : null;
   const top = market ? [...market.models].sort((a, b) => b.sellers_total - a.sellers_total).slice(0, 4) : [];
   const wide = market ? widest(market) : null;
   const typical = market ? typicalPrice(market) : null;
   const read = market ? marketDataTime(market) : null;
   const bench = market ? benchmarkRouted(market) : null;
+  // One price: the perp mark, else what a request for the benchmark model pays now, else the median across models.
+  const level = mark !== null ? { label: `${PERP.name} · ${PERP.benchmark}`, price: usd4(mark), change: null }
+    : bench?.price != null ? { label: `${bench.name} · what a request pays`, price: perMillion(bench.price), change: bench.change1h }
+    : typical ? { label: "Median price to run an open model", price: perMillion(typical.median), change: null } : null;
   return <div className="market-card compute-card">
     <div className="cc-block">
       <div className="market-header"><div><div className="market-name">Open-model inference</div><div className="market-subtitle">Compute index{read != null && <>, updated {agoMs(read, Date.now())}</>}</div></div></div>
+      {level && <div className="cc-level"><span className="cc-label">{level.label}</span><strong>{level.price}</strong><span className="cc-unit">per 1M tokens</span>{level.change != null && <span className="cc-chg">1 h <span className={`chg is-${direction(level.change)}`}>{pct(level.change)}</span></span>}</div>}
       {market ? <>
-        {bench?.price != null ? <div className="cc-level"><span className="cc-label">What a request pays now, {bench.name}</span><strong>{perMillion(bench.price)}</strong><span className="cc-unit">per 1M tokens</span>{bench.change1h !== null && <span className="cc-chg">1 h <span className={`chg is-${direction(bench.change1h)}`}>{pct(bench.change1h)}</span></span>}</div>
-          : typical && <div className="cc-level"><span className="cc-label">Median price to run an open model</span><strong>{perMillion(typical.median)}</strong><span className="cc-unit">per 1M tokens</span></div>}
-        <div className="cc-meta">{typical ? `${bench?.price != null ? `Median across open models ${perMillion(typical.median)} · ` : ""}${count(market.index.n_quotes_up)} quotes up · ${count(market.index.n_providers)} providers · ${count(market.models.length)} models` : "No prices right now"}</div>
+        <div className="cc-meta">{typical ? `${count(market.index.n_quotes_up)} quotes up · ${count(market.index.n_providers)} providers · ${count(market.models.length)} models` : "No prices right now"}</div>
         <ul className="cc-models" aria-label="Most-sold models">{top.map(m => <li key={m.id}>
           <span className="cc-name">{m.name}</span><RangeStrip model={m} scale={scale!} quotes={false} stale={modelStale(m, Date.now())} /><b>{perMillion(m.median)}</b>
         </li>)}</ul>
         {wide && <p className="cc-note">Same model, up to {times(wide.min, wide.max)} apart: {wide.name} costs {perMillion(wide.min)} to {perMillion(wide.max)} depending on the seller.</p>}
       </> : <div className="cc-loading" aria-busy="true"><span className="sk" /><span className="sk" /><span className="sk" /></div>}
-    </div>
-    <div className="cc-block cc-perp">
-      <div className="market-header"><div><div className="market-name">{PERP.name}</div><div className="market-subtitle">{perpSubtitle}</div></div></div>
-      <div className="market-price">{mark === null ? "—" : usd4(mark)}<span className="cc-unit"> / {PERP.unit}</span></div>
-      <div className="cc-note">Settlement price{markAgo && ` · pushed ${markAgo}`}{sellers ? ` · ${sellersUp} of ${sellers} sellers up` : ""}</div>
     </div>
     <Link className="button-link" to={site.paths.compute}>Open the compute index <Arrow /></Link>
   </div>;
@@ -132,8 +130,7 @@ export default function Home({ client, indexer: anyIndexer, computeFeed = null }
           <div className="hero-actions"><Link className="button-link hero-primary" to={site.paths.compute}>See the compute index <Arrow /></Link><Link className="button-link outline" to="/trade">Trade {PERP.name}</Link><Link className="button-link outline" to={`${site.paths.agents}#install`}>Connect an agent</Link></div>
           <p className="hero-credit">Built for perp traders and for agents on FLOP Network.</p>
         </div>
-        <FeedBoundary data={compute.market}><ComputeCard market={compute.market} mark={compute.latest?.mark_usd ?? null} markAgo={compute.latest ? agoMs(compute.latest.landed_ms, compute.now) : null}
-          sellersUp={compute.latest?.pricing_set.filter(r => r.up).length ?? 0} sellers={compute.latest?.pricing_set.length ?? 0} /></FeedBoundary>
+        <FeedBoundary data={compute.market}><ComputeCard market={compute.market} mark={markUsd(compute.latest)} /></FeedBoundary>
       </div>
     </section>
     <section id="markets" className="home-sol home-container" aria-labelledby="sol-title"><div className="home-split">

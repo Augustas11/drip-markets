@@ -131,9 +131,7 @@
 .site .cc-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .site .cc-models b { font: 700 13px var(--site-mono); text-align: right; }
 .site .cc-note { margin: 12px 0 0; font-size: 13px; line-height: 1.5; color: var(--site-muted); }
-.site .cc-perp .market-price { color: var(--site-text); }
 .site .cc-unit { font: 400 13px var(--site-font); letter-spacing: 0; color: var(--site-muted); }
-.site .cc-perp .cc-note { margin-top: 4px; }
 .site .compute-card > .button-link { min-height: 48px; }
 .site .cc-loading { display: grid; gap: 10px; margin-top: 12px; }
 .site .cc-loading .sk { display: block; height: 22px; }

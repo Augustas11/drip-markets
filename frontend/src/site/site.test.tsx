@@ -361,18 +361,26 @@ test("home explains why Drip with the feed's numbers", async () => {
   expect(container.textContent).not.toMatch(/Season 0|Your key, your agent|Connect once|PnL decides|From agent to leaderboard/);
 });
 
-test("home card: routed price absent falls back to the median, and a null 1 h change is hidden", async () => {
+test("home card: without the mark it falls back to the routed price, then to the median, and a null 1 h change is hidden", async () => {
   const feed = new MockComputeFeedClient();
   const base = await feed.market();
-  vi.spyOn(feed, "market").mockResolvedValue({ ...base, routed: null, models: base.models.map(({ routed: _r, routed_usd_per_bn_gn: _g, ...m }) => m) });
+  const routed = base.models.find(m => m.id === "qwen/qwen3.8-27b")!.routed!;
+  vi.spyOn(feed, "latest").mockRejectedValue(new Error("down"));
   let container = await render(site.paths.home, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), feed);
+  expect(container.querySelector(".compute-card .cc-level")?.textContent).toBe(`Qwen3.8-27B · what a request pays${usd(routed.price)}per 1M tokens1 h ${pct(routed.change_1h_pct)}`);
+  await cleanup?.();
+  const unrouted = new MockComputeFeedClient();
+  vi.spyOn(unrouted, "latest").mockRejectedValue(new Error("down"));
+  vi.spyOn(unrouted, "market").mockResolvedValue({ ...base, routed: null, models: base.models.map(({ routed: _r, routed_usd_per_bn_gn: _g, ...m }) => m) });
+  container = await render(site.paths.home, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), unrouted);
   expect(container.querySelector(".compute-card .cc-label")?.textContent).toBe("Median price to run an open model");
   expect(container.querySelector(".compute-card .cc-meta")?.textContent).not.toContain("Median across open models");
   await cleanup?.();
   const nulled = new MockComputeFeedClient();
+  vi.spyOn(nulled, "latest").mockRejectedValue(new Error("down"));
   vi.spyOn(nulled, "market").mockResolvedValue({ ...base, models: base.models.map(m => m.routed ? { ...m, routed: { ...m.routed, change_1h_pct: null } } : m) });
   container = await render(site.paths.home, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), nulled);
-  expect(container.querySelector(".compute-card .cc-label")?.textContent).toBe("What a request pays now, Qwen3.8-27B");
+  expect(container.querySelector(".compute-card .cc-label")?.textContent).toBe("Qwen3.8-27B · what a request pays");
   expect(container.querySelector(".compute-card .cc-chg")).toBeNull();
 });
 
@@ -406,14 +414,16 @@ test("home leads with the compute index, then the perp", async () => {
   const container = await render(site.paths.home, new MockIndexerClient(), new MockMarketClient({ autoTick: false }), new MockComputeFeedClient(now));
   const market = marketFixture(now);
   const card = container.querySelector(".compute-card")!;
-  const routed = market.models.find(m => m.id === "qwen/qwen3.8-27b")!.routed!;
-  expect(card.querySelector(".cc-level")?.textContent).toBe(`What a request pays now, Qwen3.8-27B${usd(routed.price)}per 1M tokens1 h ${pct(routed.change_1h_pct)}`);
-  expect(card.querySelector(".cc-meta")?.textContent).toBe(`Median across open models ${usd(typicalPrice(market)!.median)} · ${market.index.n_quotes_up} quotes up · ${market.index.n_providers} providers · ${market.models.length} models`);
+  // One price: the COMPUTE-PERP mark.
+  expect(card.querySelectorAll(".cc-level")).toHaveLength(1);
+  expect(card.querySelector(".cc-level")?.textContent).toBe("COMPUTE-PERP · Qwen3.8-27B$0.3036per 1M tokens");
+  expect(card.querySelector(".cc-perp")).toBeNull();
+  expect(card.querySelector(".cc-meta")?.textContent).toBe(`${market.index.n_quotes_up} quotes up · ${market.index.n_providers} providers · ${market.models.length} models`);
+  expect(card.textContent).not.toContain(usd(typicalPrice(market)!.median) + " ·");
+  expect(card.querySelector('a.button-link[href="/compute"]')?.textContent?.trim()).toBe("Open the compute index");
   expect(card.querySelector(".cc-index")).toBeNull();
   expect(container.querySelector(".announcement")).toBeNull();
   expect(card.querySelectorAll(".cc-models .strip")).toHaveLength(4);
-  expect(card.querySelector(".cc-perp .market-price")?.textContent).toBe("$0.3036 / 1M tokens");
-  expect(card.textContent).toContain("Settlement price · pushed 3 min ago · 2 of 2 sellers up");
   expect(container.querySelector(".hero-description")?.textContent).toContain(`What open-model inference costs right now: ${market.index.n_quotes_up} quotes up from ${market.index.n_providers} providers on ${market.models.length} models.`);
   expect(container.querySelector('.home-hero .hero-primary')?.getAttribute("href")).toBe("/compute");
   expect(container.querySelector(".hero-credit")?.textContent).toBe("Built for perp traders and for agents on FLOP Network.");
@@ -422,8 +432,6 @@ test("home leads with the compute index, then the perp", async () => {
   expect(Array.from(container.querySelectorAll(".nav-links a")).map(a => [a.textContent, a.getAttribute("href")])).toEqual([["Index", "/compute"], ["Arena", "/arena"], ["Challenge", "/challenge"], ["Agents", "/agents"], ["Docs", "/docs"]]);
   expect(Array.from(container.querySelectorAll(".nav-actions a"), a => [a.textContent, a.getAttribute("href")])).toEqual([["Trade", "/trade"]]);
   expect(container.querySelector(".nav-links")?.textContent).not.toContain("SOL-PERP");
-  expect(card.querySelector(".cc-perp .market-name")?.textContent).toBe("COMPUTE-PERP");
-  expect(card.querySelector(".cc-perp .market-subtitle")?.textContent).toBe("USD per 1M tokens · Qwen3.8-27B");
   expect(container.querySelector("#sol-title")?.textContent).toBe("Trade the price of compute.");
   expect(container.querySelector(".home-sol .market-name")?.textContent).toBe("COMPUTE-PERP");
   expect(Array.from(container.querySelectorAll("footer a")).filter(a => ["Index", "Docs"].includes(a.textContent!)).map(a => a.getAttribute("href"))).toEqual(["/compute", "/docs"]);
