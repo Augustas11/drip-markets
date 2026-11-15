@@ -16,6 +16,8 @@ export interface ComputeLatest {
   set: string | null;
   clamp: string | null;
   blend_in_out: number;
+  /** The settlement rule the mark follows, e.g. "clamp3"; absent or "spec" for the pricing-set rule. */
+  mark_rule?: string | null;
   pricing_set: PricingRow[];
   sellers: Seller[];
   flop_side: {
@@ -29,6 +31,13 @@ export interface ComputeLatest {
     window_s?: number | null;
   };
 }
+
+/** The perp mark, or null when latest.json is missing or carries no usable number. */
+export const markUsd = (latest: ComputeLatest | null | undefined) =>
+  typeof latest?.mark_usd === "number" && Number.isFinite(latest.mark_usd) && latest.mark_usd > 0 ? latest.mark_usd : null;
+
+/** True when the mark follows the pricing-set rule: `mark_rule` absent, not a string, empty or "spec". */
+export const specRule = (latest: ComputeLatest) => typeof latest.mark_rule !== "string" || latest.mark_rule === "" || latest.mark_rule === "spec";
 
 export interface ComputeHistory {
   v: number;

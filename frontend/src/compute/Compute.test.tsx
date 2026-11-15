@@ -1,13 +1,13 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, expect, test, vi } from "vitest";
-import Compute, { windowLabel } from "../pages/Compute";
+import Compute, { markChange1h } from "../pages/Compute";
 import Docs from "../pages/Docs";
-import type { ComputeFeedClient, ComputeMarket } from "./client";
+import type { ComputeFeedClient, ComputeHistory, ComputeLatest, ComputeMarket } from "./client";
 import { MockComputeFeedClient } from "./mock";
 import { marketFixture } from "./fixture";
 import { logScale, spreadRatios, typicalPrice, upPriced, widestModels } from "./charts";
-import { count, times, usd, usdSmall } from "./format";
+import { count, pct, times, usd, usd4, usdSmall } from "./format";
 import { site } from "../site/config";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -40,8 +40,9 @@ test("renders the index, its scale and every section from the fixture", async ()
   const text = container.textContent!;
   expect(container.querySelector("h1")?.textContent).toBe("Compute index");
   const typical = typicalPrice(market)!;
-  expect(container.querySelector(".cx-label")?.textContent).toBe("Median price to run an open model");
-  expect(container.querySelector(".cx-price")?.textContent).toBe(`${usd(typical.median)}per 1M tokens`);
+  expect(container.querySelector(".cx-label")?.textContent).toBe("COMPUTE-PERP · Qwen3.8-27B");
+  expect(container.querySelector(".cx-price")?.textContent).toBe("$0.3036per 1M tokens");
+  expect(container.querySelector("#board .cx-board-median")?.textContent).toBe(`Median across ${typical.models} models ${usd(typical.median)} per 1M tokens`);
   expect(container.querySelector(".cx-range")).toBeNull();
   expect(Array.from(container.querySelectorAll(".cx-proof li"), li => li.textContent)).toEqual([`${count(market.index.n_quotes_up)} live quotes`, `${count(market.index.n_providers)} providers`, `${count(market.models.length)} models`]);
   expect(typical.quotes).toBe(market.models.filter(m => !m.thin).reduce((n, m) => n + upPriced(m).length, 0));
@@ -61,7 +62,8 @@ test("renders the index, its scale and every section from the fixture", async ()
   expect(who.map(a => a.getAttribute("href"))).toEqual(["#board", "#providers", "#perp"]);
   for (const a of who) expect(container.querySelector(a.getAttribute("href")!)).not.toBeNull();
   expect(who[0].textContent).toContain(`Cheapest seller for each of ${market.models.length} models`);
-  expect(who[2].textContent).toContain("now $0.3036");
+  expect(who[2].textContent).toContain("Trade the Qwen3.8-27B price with COMPUTE-PERP");
+  expect(who[2].textContent).not.toContain("$");
   // The perp sits right after the board, before providers.
   const order = ["#board", "#perp", "#providers"].map(id => Array.from(container.querySelectorAll("section, article")).indexOf(container.querySelector(id)!));
   expect(order).toEqual([...order].sort((a, b) => a - b));
@@ -92,7 +94,7 @@ test("draws one range strip per model on a shared log scale", async () => {
   expect(rows[0].querySelector(".m-name")?.textContent).toBe("GLM 5.3");
   const glm = market.models.find(m => m.name === "GLM 5.3")!;
   expect(rows[0].querySelectorAll(".strip-dot")).toHaveLength(glm.quotes.filter(q => q.price !== null).length);
-  expect(container.querySelectorAll(".strip-axis span").length).toBeGreaterThan(2);
+  expect(container.querySelectorAll(".strip-axis span").length).toBeGreaterThanOrEqual(2);
   // Thin models are tagged.
   expect(Array.from(container.querySelectorAll(".board-row.is-thin .m-name")).map(n => n.textContent).sort()).toEqual(market.models.filter(m => m.thin).map(m => m.name).sort());
   expect(container.querySelectorAll(".board-row.is-thin").length).toBeGreaterThan(0);
@@ -142,14 +144,15 @@ test("providers, price moves and dynamic pricers come from the feed", async () =
   const market = marketFixture();
   const container = await render(liveFeed());
   const providers = container.querySelector('[aria-labelledby="compute-providers-heading"]')!;
-  expect(providers.querySelectorAll("tbody tr")).toHaveLength(8);
+  expect(providers.querySelectorAll("tbody tr")).toHaveLength(Math.min(12, market.providers.length));
   await click(providers.querySelector(".cx-more")!);
   expect(providers.querySelectorAll("tbody tr")).toHaveLength(market.providers.length);
   const moves = container.querySelector('[aria-labelledby="compute-moves-heading"]')!;
-  expect(moves.querySelectorAll(".move-list:not(.dyn-list) li")).toHaveLength(market.changes.length);
-  expect(moves.querySelectorAll(".dyn-list li")).toHaveLength(market.dynamic.length);
-  expect(moves.querySelector(".dyn-list li")?.textContent).toContain("212 changes");
-  expect(moves.textContent).not.toContain("Frequent repricers");
+  expect(moves.querySelectorAll(".move-list li")).toHaveLength(Math.min(8, market.changes.length));
+  const reps = container.querySelector(".cx-repricers")!;
+  expect(reps.querySelectorAll(".dyn-list li")).toHaveLength(Math.min(6, market.dynamic.length));
+  expect(reps.querySelector(".dyn-list li")?.textContent).toContain("212 changes");
+  expect(reps.textContent).not.toContain("Frequent repricers");
 });
 
 test("a seller with 3+ changes is grouped as a frequent repricer, never contradicted", async () => {
@@ -157,30 +160,34 @@ test("a seller with 3+ changes is grouped as a frequent repricer, never contradi
   const repeat = (at: number, from: number, to: number) => ({ at_ms: now - at * 60_000, model: "openai/gpt-oss-120b", provider: "PrimeIntellect", quantization: "fp4", from, to });
   const container = await render(liveFeed(now, m => ({ ...m, dynamic: [], changes: [repeat(5, 0.0385, 0.0493), repeat(15, 0.0493, 0.041), repeat(25, 0.041, 0.0385), { ...repeat(9, 0.2, 0.22), provider: "Novita" }] })));
   const moves = container.querySelector('[aria-labelledby="compute-moves-heading"]')!;
-  expect(moves.textContent).toContain("Frequent repricers");
-  const rows = Array.from(moves.querySelectorAll(".dyn-list li")).map(li => li.textContent);
+  const reps = container.querySelector(".cx-repricers")!;
+  expect(reps.textContent).toContain("Frequent repricers");
+  const rows = Array.from(reps.querySelectorAll(".dyn-list li")).map(li => li.textContent);
   expect(rows).toEqual(["PrimeIntellectGPT-OSS-120B · fp4$0.0385–$0.04933 changes"]);
-  expect(moves.querySelectorAll(".move-list:not(.dyn-list) li")).toHaveLength(1);
-  expect(moves.textContent).not.toContain("No seller repriced");
-  expect(moves.textContent).not.toContain("Dynamic pricers");
+  expect(moves.querySelectorAll(".move-list li")).toHaveLength(1);
+  expect(reps.textContent).not.toContain("No seller repriced");
+  expect(reps.textContent).not.toContain("Dynamic pricers");
 });
 
-test("the perp and FLOP panels show the settlement price, its sellers and FLOP's rate", async () => {
+test("the settlement and FLOP panels show the sellers, the push and FLOP's rate, and no second mark", async () => {
   const container = await render(liveFeed());
   const perp = container.querySelector('[aria-labelledby="compute-perp-heading"]')!;
-  expect(perp.querySelector(".perp-price strong")?.textContent).toBe("$0.3036");
+  expect(perp.querySelector("h2")?.textContent).toBe("Settlement");
+  expect(perp.querySelector(".perp-price")).toBeNull();
   expect(Array.from(perp.querySelectorAll(".perp-sellers li")).map(li => li.textContent)).toEqual(["DeepInfra bf16$0.2578up", "Cerebras fp16$1.0213up"]);
   expect(perp.querySelector(".cx-k")?.textContent).toBe("COMPUTE-PERP · USD per 1M tokens · Qwen3.8-27B");
-  expect(perp.querySelector(".trade-note")?.textContent).toBe("Test tokens");
+  expect(perp.querySelector(".trade-note")).toBeNull();
+  expect(container.querySelector(".cx-hero .cx-act .trade-note")?.textContent).toBe("Test tokens");
   expect(perp.textContent).not.toContain("full-precision (bf16/fp16) sellers of one benchmark model");
   expect(perp.querySelector('a[href^="https://explorer.solana.com/tx/4w4fnV"]')).not.toBeNull();
-  expect(perp.querySelector('.panel-actions a[href="/trade"]')?.textContent?.trim()).toBe("Trade COMPUTE-PERP");
-  expect(perp.querySelector(".perp-hist figcaption")?.textContent).toBe("7 d · low $0.3036 · high $0.3112");
+  expect(perp.querySelector('a[href="/trade"]')).toBeNull();
+  expect(container.querySelector('.cx-hero .cx-act a[href="/trade"]')?.textContent?.trim()).toBe("Trade COMPUTE-PERP");
+  expect(perp.querySelector(".perp-range")?.textContent).toBe("7 d · low $0.3036 · high $0.3112");
+  expect(perp.querySelector(".spark")).toBeNull();
+  expect(perp.textContent).toMatch(/^COMPUTE-PERP · USD per 1M tokens · Qwen3.8-27BSettlement7 d · low/);
   const flop = container.querySelector('[aria-labelledby="compute-flop-heading"]')!;
   expect(Array.from(flop.querySelectorAll(".flop-parity .flop-facts dd"), v => v.textContent)).toEqual([usd(marketFixture().flop!.parity!.market_usd_per_bn_gn), "0.00291"]);
-  expect(flop.querySelector(".flop-window")?.textContent).toBe("Last 6 hours");
-  expect(Array.from(flop.querySelectorAll(".flop-facts:not(.flop-parity .flop-facts) dt")).map(v => v.textContent)).toEqual(["Buyer accounts", "Miners", "Jobs settled"]);
-  expect(Array.from(flop.querySelectorAll(".flop-facts:not(.flop-parity .flop-facts) dd")).map(v => v.textContent)).toEqual(["3", "34", "185"]);
+  expect(flop.querySelector(".cx-updated")?.textContent).toMatch(/^Parity read /);
   expect(flop.textContent).not.toContain("FLOP's gateway buys on behalf");
   expect(flop.textContent).not.toContain("The perp settles on seller prices, not on this rate.");
 });
@@ -218,7 +225,7 @@ test("a failed market.json still shows the perp panel", async () => {
   const mock = new MockComputeFeedClient();
   const container = await render({ latest: () => mock.latest(), history: () => mock.history(), market: () => Promise.reject(new Error("price feed 404")) });
   expect(container.textContent).toContain("Market feed unreachable (price feed 404).");
-  expect(container.querySelector('[aria-labelledby="compute-perp-heading"] .perp-price strong')?.textContent).toBe("$0.3036");
+  expect(container.querySelectorAll('[aria-labelledby="compute-perp-heading"] .perp-sellers li')).toHaveLength(2);
 });
 
 test("marks a stale market feed and a stale settlement price", async () => {
@@ -279,10 +286,19 @@ test("one malformed section does not blank the page", async () => {
 
 test("no models: a plain empty state, not a hung tab", async () => {
   expect(logScale(Infinity, -Infinity).ticks.length).toBeGreaterThan(0);
-  const container = await render(liveFeed(Date.now(), m => ({ ...m, models: [], providers: [], changes: [], dynamic: [] })));
-  expect(container.querySelector(".cx-label")?.textContent).toBe("No prices right now.");
+  const empty = (m: ComputeMarket) => ({ ...m, models: [], providers: [], changes: [], dynamic: [] });
+  let container = await render(liveFeed(Date.now(), empty));
+  // The hero still leads with the perp mark.
+  expect(container.querySelector(".cx-price strong")?.textContent).toBe("$0.3036");
   expect(container.querySelector("#board .cx-empty")?.textContent).toMatch(/^No prices right now/);
+  expect(container.querySelector("#board .cx-board-median")).toBeNull();
   expect(container.querySelector(".cx-proof")).toBeNull();
+  await cleanup?.();
+  const feed = liveFeed(Date.now(), m => stripRouted(empty(m)));
+  vi.spyOn(feed, "latest").mockRejectedValue(new Error("down"));
+  container = await render(feed);
+  expect(container.querySelector(".cx-label")?.textContent).toBe("No prices right now.");
+  expect(container.querySelector(".cx-price")).toBeNull();
 });
 
 test("held quotes do not change the hero counts and the held sentence is gone", async () => {
@@ -299,6 +315,8 @@ test("latest.json from the future or a stopped feed is stale", async () => {
   vi.spyOn(feed, "latest").mockResolvedValue({ ...base, generated_ms: old, landed_ms: old - 60_000 });
   let container = await render(feed);
   expect(container.querySelector('.compute-stale[title="The price feed has not updated for over 30 minutes."]')).not.toBeNull();
+  // A mark that stopped updating does not lead the page: the hero shows the benchmark price instead.
+  expect(container.querySelector(".cx-hero .cx-label")?.textContent).toContain("what a request pays");
   await cleanup?.();
   vi.spyOn(feed, "latest").mockResolvedValue({ ...base, landed_ms: base.generated_ms + 6 * 60_000 });
   container = await render(feed);
@@ -310,7 +328,8 @@ test("the hero shows no index line or index change, however long the series", as
   const container = await render(liveFeed(now, m => ({ ...m, index: { ...m.index, change_24h_pct: 1.234, change_7d_pct: -0.5, series: Array.from({ length: 24 }, (_, i) => [now - (24 - i) * 3_600_000, 100 + i / 10] as [number, number]) } })));
   expect(container.querySelector(".cx-index-line")).toBeNull();
   expect(container.querySelector(".cx-indexstat")).toBeNull();
-  expect(container.querySelector(".cx-hero")?.textContent).not.toMatch(/24 h|7 d/);
+  // Only the mark's own 1 h change and 7 d sparkline tag; never the index's 24 h or 7 d change.
+  expect(container.querySelector(".cx-hero")?.textContent).not.toMatch(/24 h|\+1\.2%|−0\.5%/);
 });
 
 test("a flop_standin price still shows the FLOP panel without the removed explainer", async () => {
@@ -379,7 +398,7 @@ test("docs describe a flop_standin settlement price", async () => {
   expect(container.querySelector("#compute-perp")!.textContent).toContain("FLOP's on-chain price (flop_standin)");
 });
 
-test("mix switch: hidden without per-mix data, then moves the headline, the medians and the sort", async () => {
+test("mix switch: hidden without per-mix data, then, in the board header, moves the board median, the medians and the sort", async () => {
   let container = await render(liveFeed());
   expect(container.querySelector(".cx-mix")).toBeNull();
   await cleanup?.();
@@ -389,15 +408,19 @@ test("mix switch: hidden without per-mix data, then moves the headline, the medi
     ...m, out_in_ratio_median: 4.13, mixes: { chat_3_1: 0.987, avg_15_1: null, agent_150_1: 0.111 },
     models: m.models.map(x => ({ ...x, mix: { chat_3_1: x.id === cheap.id ? 99 : x.median * 2, avg_15_1: x.median, agent_150_1: x.median / 2 } })),
   })));
-  const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>(".cx-mix button"));
+  expect(container.querySelector(".cx-hero .cx-mix")).toBeNull();
+  const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>("#board .cx-section-head .cx-mix button"));
   expect(buttons.map(b => b.textContent)).toEqual(["Chat 3:1", "Average 15:1", "Agent 150:1"]);
   expect(buttons[1].getAttribute("aria-pressed")).toBe("true");
-  expect(container.querySelector(".cx-price strong")?.textContent).toBe(usd(typicalPrice(market)!.median));
+  const median = () => container.querySelector("#board .cx-board-median strong")?.textContent;
+  expect(median()).toBe(usd(typicalPrice(market)!.median));
   expect(container.querySelector(".cx-mix-why")).toBeNull();
-  expect(container.querySelector("#board .cx-sub")?.textContent).toBe("USD per 1M tokens");
   expect(container.querySelector(".board-cols .c-median")?.textContent).toBe("Median");
   await click(buttons[0]);
-  expect(container.querySelector(".cx-price strong")?.textContent).toBe("$0.987");
+  expect(median()).toBe("$0.987");
+  expect(buttons[0].getAttribute("aria-pressed")).toBe("true");
+  // The hero price is the perp mark; the mix never moves it.
+  expect(container.querySelector(".cx-price strong")?.textContent).toBe("$0.3036");
   expect(container.querySelector(".board-cols .c-median")?.textContent).toBe("Median 3:1");
   const glm = Array.from(container.querySelectorAll(".board-row")).find(r => r.querySelector(".m-name")?.textContent === "GLM 5.3")!;
   expect(glm.querySelector(".c-median")?.textContent).toBe(`median ${usd(market.models.find(m => m.name === "GLM 5.3")!.median * 2)}`);
@@ -406,8 +429,10 @@ test("mix switch: hidden without per-mix data, then moves the headline, the medi
   // Strips stay on the 15:1 quotes.
   expect(container.querySelector(".board-row .strip")?.getAttribute("aria-label")).toContain(`median ${usd(cheap.median)}`);
   // Back to 15:1: no top-level avg value, so the median of the model medians.
+  await click(buttons[2]);
+  expect(median()).toBe("$0.111");
   await click(buttons[1]);
-  expect(container.querySelector(".cx-price strong")?.textContent).toBe(usd(typicalPrice(market)!.median));
+  expect(median()).toBe(usd(typicalPrice(market)!.median));
 });
 
 test("$ per bn G_n column: formula, nulls as dashes, cheapest first when sorted", async () => {
@@ -445,40 +470,106 @@ const stripRouted = (m: ComputeMarket): ComputeMarket => {
 };
 const panel = (container: HTMLElement, id: string) => container.querySelector(`[aria-labelledby="${id}"]`)!;
 
-test("hero: labelled numbers for the benchmark model, each hidden when absent", async () => {
+const HOUR = 3_600_000;
+/** A step history: `before` until half an hour ago, then the mark. */
+const stepHistory = (now: number, before: number, mark: number, from = now - 7 * 24 * HOUR): ComputeHistory => ({
+  v: 1, generated_ms: now, from_ms: from, to_ms: now, high: Math.max(before, mark), low: Math.min(before, mark),
+  points: [[from, before], [now - 0.5 * HOUR, mark], [now - 60_000, mark]], changes: [], outages: [], recorder_gaps: [],
+});
+
+test("hero: exactly one price, the perp mark, with its 1 h change, a mark sparkline and the trade button", async () => {
+  const now = Date.now();
+  const mock = new MockComputeFeedClient(now);
+  const latest = await mock.latest();
+  const history = stepHistory(now, 0.29, latest.mark_usd!, now - 3 * 24 * HOUR);
+  const container = await render({ latest: async () => latest, history: async () => history, market: async () => marketFixture(now) });
+  const main = container.querySelector(".cx-hero-main")!;
+  expect(main.querySelector("h1#compute-title.cx-title")?.textContent).toBe("Compute index");
+  expect(main.querySelector(".cx-label")?.textContent).toBe("COMPUTE-PERP · Qwen3.8-27B");
+  const prices = main.querySelectorAll("strong");
+  expect(prices).toHaveLength(1);
+  expect(prices[0].textContent).toBe(usd4(latest.mark_usd));
+  expect(main.textContent!.match(/\$/g)).toHaveLength(1);
+  expect(main.querySelector(".cx-price span")?.textContent).toBe("per 1M tokens");
+  const change = (latest.mark_usd! / 0.29 - 1) * 100;
+  expect(main.querySelector(".cx-move-chg")?.textContent).toBe(`1 h${pct(change)}`);
+  expect(main.querySelector(".cx-move-chg .chg.is-up")).not.toBeNull();
+  expect(main.querySelector(".cx-move svg.spark")?.getAttribute("aria-label")).toMatch(/^COMPUTE-PERP mark since /);
+  expect(main.querySelector('.cx-act a[href="/trade"]')?.textContent?.trim()).toBe("Trade COMPUTE-PERP");
+  expect(main.querySelector(".cx-foot .cx-updated")?.textContent).toMatch(/^Updated /);
+  expect(container.querySelector(".cx-hero .cx-mix")).toBeNull();
+  // The right-hand card stays.
+  expect(container.querySelector(".cx-hero-side .cx-spread-line")).not.toBeNull();
+  // The benchmark strip is gone.
+  expect(container.querySelector(".cx-bench")).toBeNull();
+  expect(container.textContent).not.toMatch(/What a request pays now|Perp mark/);
+});
+
+test("markChange1h reads the step series an hour before the push, and is null when history is short or missing", async () => {
+  const now = Date.now();
+  const latest = { ...(await new MockComputeFeedClient(now).latest()), landed_ms: now };
+  expect(markChange1h(0.3, latest, stepHistory(now, 0.25, 0.3))).toBeCloseTo(20);
+  expect(markChange1h(0.3, latest, { ...stepHistory(now, 0.25, 0.3), points: [[now - 2 * HOUR, 0.3]] })).toBe(0);
+  expect(markChange1h(0.3, latest, stepHistory(now, 0.25, 0.3, now - 0.5 * HOUR))).toBeNull();
+  expect(markChange1h(0.3, latest, null)).toBeNull();
+});
+
+test("hero: the 1 h change and sparkline are left out when history.json is missing or too short", async () => {
+  const now = Date.now();
+  const mock = new MockComputeFeedClient(now);
+  let container = await render({ latest: () => mock.latest(), history: () => Promise.reject(new Error("price feed 404")), market: async () => marketFixture(now) });
+  expect(container.querySelector(".cx-price strong")?.textContent).toBe("$0.3036");
+  expect(container.querySelector(".cx-move")).toBeNull();
+  await cleanup?.();
+  container = await render({ latest: () => mock.latest(), history: async () => stepHistory(now, 0.29, 0.303551, now - 0.5 * HOUR), market: async () => marketFixture(now) });
+  expect(container.querySelector(".cx-move")).toBeNull();
+});
+
+test("hero: without latest.json it shows what a request for the benchmark model pays", async () => {
   const now = Date.now(), market = marketFixture(now);
-  const bench = market.models.find(m => m.id === "qwen/qwen3.8-27b")!;
-  let container = await render(liveFeed(now));
-  const block = container.querySelector(".cx-bench")!;
-  expect(block.querySelector(".cx-k")?.textContent).toBe("Qwen3.8-27B · per 1M tokens");
-  expect(Array.from(block.querySelectorAll("dt"), d => d.textContent)).toEqual(["What a request pays now", "Perp mark"]);
-  const dds = Array.from(block.querySelectorAll("dd"), d => d.querySelector("strong")?.textContent);
-  expect(dds).toEqual([usd(bench.routed!.price), "$0.3036"]);
-  expect(block.querySelector(".is-main dd")?.textContent).toContain("1 h ");
-  expect(block.querySelector(".is-main svg.spark")).not.toBeNull();
-  expect(block.textContent).not.toContain("List prices are what sellers post");
-  expect(block.textContent).not.toContain("Median list price");
-  const go = block.querySelector("a.cx-bench-go");
-  expect(go?.getAttribute("href")).toBe("/trade");
-  expect(go?.textContent).toContain("Trade COMPUTE-PERP");
-  // The headline above it stays the cross-model median, under its own label.
-  expect(container.querySelector(".cx-label")?.textContent).toBe("Median price to run an open model");
-  await cleanup?.();
-  container = await render(liveFeed(now, stripRouted));
-  expect(Array.from(container.querySelectorAll(".cx-bench dt"), d => d.textContent)).toEqual(["Perp mark"]);
-  expect(container.querySelector(".cx-bench .spark")).toBeNull();
-  await cleanup?.();
-  container = await render(liveFeed(now, m => ({ ...stripRouted(m), models: [] })));
-  expect(container.querySelector(".cx-bench dt")?.textContent).toBe("Perp mark");
-  await cleanup?.();
-  const feed = liveFeed(now, m => m);
+  const routed = market.models.find(m => m.id === "qwen/qwen3.8-27b")!.routed!;
+  const feed = liveFeed(now);
   vi.spyOn(feed, "latest").mockRejectedValue(new Error("down"));
-  container = await render(feed);
-  expect(Array.from(container.querySelectorAll(".cx-bench dt"), d => d.textContent)).toEqual(["What a request pays now"]);
-  // A null 1 h change is not shown.
+  let container = await render(feed);
+  const main = container.querySelector(".cx-hero-main")!;
+  expect(main.querySelector(".cx-label")?.textContent).toBe("Qwen3.8-27B · what a request pays");
+  expect(Array.from(main.querySelectorAll("strong"), s => s.textContent)).toEqual([usd(routed.price)]);
+  expect(main.querySelector(".cx-move-chg")?.textContent).toBe(`1 h${pct(routed.change_1h_pct)}`);
+  expect(main.querySelector(".cx-move svg.spark")?.getAttribute("aria-label")).toMatch(/^Qwen3.8-27B routed price since /);
   await cleanup?.();
-  container = await render(liveFeed(now, m => ({ ...m, models: m.models.map(x => x.routed ? { ...x, routed: { ...x.routed, change_1h_pct: null } } : x) })));
-  expect(container.querySelector(".cx-bench .cx-bench-chg")).toBeNull();
+  // A null 1 h change is not shown.
+  const nulled = liveFeed(now, m => ({ ...m, models: m.models.map(x => x.routed ? { ...x, routed: { ...x.routed, change_1h_pct: null } } : x) }));
+  vi.spyOn(nulled, "latest").mockRejectedValue(new Error("down"));
+  container = await render(nulled);
+  expect(container.querySelector(".cx-move-chg")).toBeNull();
+  await cleanup?.();
+  // A latest.json without a mark falls back too.
+  const markless = liveFeed(now);
+  const base = await markless.latest();
+  vi.spyOn(markless, "latest").mockResolvedValue({ ...base, mark_usd: null });
+  container = await render(markless);
+  expect(container.querySelector(".cx-label")?.textContent).toBe("Qwen3.8-27B · what a request pays");
+});
+
+test("settlement panel: the seller list shows under the spec rule and hides under clamp3", async () => {
+  const withRule = async (rule: ComputeLatest["mark_rule"]) => {
+    const feed = liveFeed();
+    const base = await feed.latest();
+    vi.spyOn(feed, "latest").mockResolvedValue(rule === undefined ? base : { ...base, mark_rule: rule });
+    const container = await render(feed);
+    return panel(container, "compute-perp-heading");
+  };
+  for (const rule of [undefined, null, "spec"] as const) {
+    const perp = await withRule(rule);
+    expect(perp.querySelectorAll(".perp-sellers li")).toHaveLength(2);
+    expect(perp.textContent).toContain("2 of 2 full-precision sellers up");
+    await cleanup?.(); cleanup = undefined;
+  }
+  const perp = await withRule("clamp3");
+  expect(perp.querySelector(".perp-sellers")).toBeNull();
+  expect(perp.textContent).not.toContain("full-precision sellers up");
+  expect(perp.querySelector(".cx-updated")?.textContent).toMatch(/^Pushed .* · tx /);
+  expect(perp.querySelector('a[href^="https://explorer.solana.com/tx/4w4fnV"]')).not.toBeNull();
 });
 
 test("board: Paid now column, sortable, with where the money goes and a capped mark", async () => {
@@ -530,7 +621,7 @@ test("FLOP parity: headline is the routed implied price, list price beside it, a
   expect(flop.querySelector(".flop-parity .flop-facts > div small")?.textContent).toBe("$ per bn G_n, Qwen3.8-27B, from what requests pay");
   // implied FLOP price = USD per bn G_n / 1e9 / FLOP per G_n.
   expect(p.implied_flop_usd_routed!).toBeCloseTo(p.market_usd_per_bn_gn! / 1e9 / p.flop_rate_flop_per_gn!, 6);
-  expect(flop.querySelector(".flop-window")?.textContent).toBe("Last 6 hours");
+  expect(flop.querySelector(".flop-window")).toBeNull();
 });
 
 test("FLOP panel without parity falls back to the implied price; without flop it is hidden", async () => {
@@ -579,10 +670,12 @@ test("one quote count on /compute: quotes up from the index", async () => {
   expect(container.querySelector(".cx-proof li")?.textContent).toBe(`${count(market.index.n_quotes_up)} live quotes`);
 });
 
-test("the FLOP window label reads the feed's window, else six hours", () => {
-  expect(windowLabel(site.flopWindowS)).toBe("Last 6 hours");
-  expect(windowLabel(3600)).toBe("Last 1 hour");
-  expect(windowLabel(1800)).toBe("Last 30 minutes");
+test("the FLOP panel has no activity tiles or window label", async () => {
+  const container = await render(liveFeed());
+  const flop = panel(container, "compute-flop-heading");
+  expect(flop.textContent).not.toMatch(/Buyer accounts|Miners|Jobs settled|Last \d+ (hours?|minutes)/);
+  expect(flop.querySelectorAll(".flop-facts")).toHaveLength(1);
+  expect(flop.querySelector(".flop-parity .flop-facts")).not.toBeNull();
 });
 
 test("FLOP parity without the routed figure labels everything as list-based", async () => {

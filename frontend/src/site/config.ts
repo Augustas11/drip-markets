@@ -49,8 +49,6 @@ export const site = {
       { name: "breakout", wallet: "BTnMJaRnc7pqWG9AGGnHqHQgQjcv6cpRz3ECGLZmBxXN" },
     ] as { name: string; wallet: string }[],
   },
-  // The FLOP stats window in latest.json when flop_side does not carry one (the pusher's flop_window_s = 21600).
-  flopWindowS: 21_600,
   faucet: null as string | null, // web faucet page not built; agents use the MCP tool claim_test_funds
   // The faucet's HTTP API (POST {faucetApi}/claim, GET {faucetApi}/health), proxied by vercel.json. It pays
   // COMPUTE-PERP's test USDC (the mint in chain/config.ts). Null hides "Get test USDC".

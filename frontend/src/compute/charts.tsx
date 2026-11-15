@@ -60,7 +60,8 @@ export function RangeStrip({ model, scale, quotes = true, stale = false }: { mod
 
 export function Axis({ scale }: { scale: LogScale }) {
   return <div className="strip-axis" aria-hidden="true">
-    {scale.ticks.map(t => <span key={t} style={{ left: `${scale.at(t)}%` }}>{tickLabel(t)}</span>)}
+    {/* Label whole decades only: the 2s and 5s collide at this width. */}
+    {scale.ticks.filter(t => Math.abs(Math.log10(t) - Math.round(Math.log10(t))) < 1e-9).map(t => <span key={t} style={{ left: `${scale.at(t)}%` }}>{tickLabel(t)}</span>)}
   </div>;
 }
 

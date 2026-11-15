@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { ComputeFeedClient, ComputeHistory, ComputeLatest, ComputeMarket, MarketModel, MixKey } from "../compute/client";
+import { markUsd, specRule, type ComputeFeedClient, type ComputeHistory, type ComputeLatest, type ComputeMarket, type MarketModel, type MixKey } from "../compute/client";
 import { Axis, DEFAULT_MIX, benchmarkRouted, MIN_SERIES_POINTS, RangeStrip, Sparkline, SpreadSwarm, computeSpread, hasMixes, marketScale, medianAt, sinceLabel, typicalPrice, widestModels, type LogScale } from "../compute/charts";
 import { addressUrl, ago, clock, count, direction, pct, short, times, txUrl, usd, usd4, usdSmall, when } from "../compute/format";
 import { latestStale, marketDataTime, marketStale, modelStale, useComputeFeed } from "../compute/useFeed";
@@ -12,7 +12,8 @@ import "../site/compute.css";
 
 export { STALE_MS } from "../compute/useFeed";
 
-const PROVIDERS_SHOWN = 8;
+const PROVIDERS_SHOWN = 12;
+const MOVES_SHOWN = 6;
 type SortKey = "sellers" | "spread" | "median" | "paid" | "gn";
 const sorts: [SortKey, string][] = [["sellers", "Most sellers"], ["spread", "Widest spread"], ["median", "Highest median"], ["paid", "Paid now"], ["gn", "Per unit of compute"]];
 const CAPPED = "No seller counts for more than half.";
@@ -41,39 +42,57 @@ function Skeleton() {
   </div>;
 }
 
-/** The benchmark model: what a request pays now and the perp mark. */
-function Benchmark({ market, latest }: { market: ComputeMarket; latest: ComputeLatest | null }) {
-  const b = benchmarkRouted(market);
-  const mark = typeof latest?.mark_usd === "number" && Number.isFinite(latest.mark_usd) ? latest.mark_usd : null;
-  if (b.price === null && mark === null) return null;
-  return <section className="cx-bench" aria-label={`${b.name} prices`}>
-    <p className="cx-k">{b.name} · per 1M tokens</p>
-    <dl className="cx-bench-nums">
-      {b.price !== null && <div className="is-main">
-        <dt>What a request pays now</dt>
-        <dd><strong>{usd(b.price)}</strong>{b.change1h !== null && <span className="cx-bench-chg">1 h <Change value={b.change1h} /></span>}</dd>
-        <Sparkline series={b.series} label={`${b.name} routed price ${sinceLabel(b.series)}.`} className="spark spark-sm" />
-      </div>}
-      {mark !== null && <div><dt>Perp mark</dt><dd><strong>{usd4(mark)}</strong></dd></div>}
-    </dl>
-    {site.computeTrade?.startsWith("/") && <Link className="button-link cx-bench-go" to={site.computeTrade}>Trade {PERP.name} <Arrow /></Link>}
-  </section>;
+const HOUR_MS = 3_600_000;
+
+/** The mark's change over the last hour from history.json's step series, or null when the history does not reach back an hour. */
+export function markChange1h(mark: number, latest: ComputeLatest, history: ComputeHistory | null) {
+  const at = latest.landed_ms - HOUR_MS;
+  if (!history || !(history.from_ms <= at)) return null;
+  let then: number | null = null;
+  for (const [t, v] of history.points) if (t <= at) then = v;
+  return then !== null && then > 0 ? (mark / then - 1) * 100 : null;
 }
 
-function Hero({ market, latest, now, error, mix, onMix }: { market: ComputeMarket; latest: ComputeLatest | null; now: number; error: string; mix: MixKey; onMix: (m: MixKey) => void }) {
+/** The hero's one price: the perp mark, else what a request for the benchmark model pays now. */
+function headline(market: ComputeMarket, latest: ComputeLatest | null, history: ComputeHistory | null, now: number) {
+  // A mark that has stopped updating never leads the page: the hero falls back to the benchmark price.
+  const mark = latestStale(latest, now) ? null : markUsd(latest);
+  if (mark !== null && latest) {
+    const series = history && history.points.length >= 2 && history.to_ms - history.from_ms >= 86_400_000 ? history.points : [];
+    return { label: `${PERP.name} · ${PERP.benchmark}`, price: usd4(mark), change: markChange1h(mark, latest, history), series, step: true, what: `${PERP.name} mark` };
+  }
+  const b = benchmarkRouted(market);
+  if (b.price === null) return null;
+  return { label: `${b.name} · what a request pays`, price: usd(b.price), change: b.change1h, series: b.series, step: false, what: `${b.name} routed price` };
+}
+
+function TradeLink({ latest }: { latest: ComputeLatest | null }) {
+  const trade = site.computeTrade;
+  if (trade) return trade.startsWith("/") ? <Link className="button-link" to={trade}>Trade {PERP.name} <Arrow /></Link> : <a className="button-link" href={trade}>Trade {PERP.name} <Arrow /></a>;
+  return latest?.market ? <a className="button-link outline" href={addressUrl(latest.market)} target="_blank" rel="noreferrer">Market account <Arrow /></a> : null;
+}
+
+function Hero({ market, latest, history, now, error }: { market: ComputeMarket; latest: ComputeLatest | null; history: ComputeHistory | null; now: number; error: string }) {
   const { index } = market;
   const stale = marketStale(market, now);
   const wide = widestModels(market)[0] ?? null;
-  const typical = typicalPrice(market, mix);
+  const typical = typicalPrice(market);
   const read = marketDataTime(market);
+  const head = headline(market, latest, history, now);
+  const spark = head && head.series.length >= 2 ? head.series : [];
   return <header className={`cx-hero${wide ? "" : " is-empty"}`} aria-labelledby="compute-title">
     <div className="cx-hero-main">
       <h1 id="compute-title" className="cx-title">Compute index</h1>
-      {typical ? <>
-        <p className="cx-label">Median price to run an open model</p>
-        <div className="cx-price"><strong>{usd(typical.median)}</strong><span>per 1M tokens</span></div>
-        {hasMixes(market) && <MixSwitch mix={mix} onMix={onMix} />}
-      </> : <p className="cx-label">{market.models.length ? "No model has enough sellers for a price right now." : "No prices right now."}</p>}
+      {head ? <>
+        <p className="cx-label">{head.label}</p>
+        <div className="cx-price"><strong>{head.price}</strong><span>per 1M tokens</span></div>
+        {(head.change !== null || spark.length > 0) && <div className="cx-move">
+          {head.change !== null && <span className="cx-move-chg"><span className="cx-k">1 h</span><Change value={head.change} /></span>}
+          {head.step && spark.length >= 2 && <span className="cx-k">{sinceLabel(spark)}</span>}
+          <Sparkline step={head.step} min={head.step ? 2 : undefined} series={spark} label={`${head.what} ${sinceLabel(spark)}.`} className="spark cx-move-spark" />
+        </div>}
+        {(site.computeTrade || latest?.market) && <div className="cx-act"><TradeLink latest={latest} /><span className="trade-note">Test tokens</span></div>}
+      </> : <p className="cx-label">No prices right now.</p>}
       <div className="cx-foot">
         {typical && <ul className="cx-proof">
           <li><b>{count(index.n_quotes_up)}</b> live quotes</li>
@@ -88,15 +107,14 @@ function Hero({ market, latest, now, error, mix, onMix }: { market: ComputeMarke
       <p className="cx-spread-line">The same model costs up to <strong>{times(wide.min, wide.max)}</strong> more depending on the seller.</p>
       <SpreadSwarm market={market} />
     </div>}
-    <Benchmark market={market} latest={latest} />
   </header>;
 }
 
-function Audience({ market, latest }: { market: ComputeMarket; latest: ComputeLatest | null }) {
+function Audience({ market }: { market: ComputeMarket }) {
   const rows: [string, string, string][] = [
     ["Buying inference", `Cheapest seller for each of ${count(market.models.length)} models`, "#board"],
     ["Selling or mining", `Where your price sits against ${count(market.index.n_providers)} providers`, "#providers"],
-    ["Trading", latest ? `Hedge the Qwen3.8-27B price with the perp, now ${usd4(latest.mark_usd)}` : "Hedge the Qwen3.8-27B price with the perp", "#perp"],
+    ["Trading", `Trade the ${PERP.benchmark} price with ${PERP.name}`, "#perp"],
   ];
   return <nav className="cx-who" aria-label="Jump to">
     {rows.map(([who, what, href]) => <a key={href} href={href}><span className="cx-k">{who}</span><span className="who-what">{what}</span><Arrow /></a>)}
@@ -179,7 +197,7 @@ const MODELS_SHOWN = 20;
 const byNum = (a: number | null | undefined, b: number | null | undefined, desc = false) =>
   a == null && b == null ? 0 : a == null ? 1 : b == null ? -1 : desc ? b - a : a - b;
 
-function Board({ market, now, mix }: { market: ComputeMarket; now: number; mix: MixKey }) {
+function Board({ market, now, mix, onMix }: { market: ComputeMarket; now: number; mix: MixKey; onMix: (m: MixKey) => void }) {
   const [all, setAll] = useState(false);
   const [sort, setSort] = useState<SortKey>("sellers");
   const [open, setOpen] = useState<Set<string>>(() => new Set());
@@ -188,6 +206,7 @@ function Board({ market, now, mix }: { market: ComputeMarket; now: number; mix: 
   const showGn = spread !== null;
   const showPaid = market.models.some(m => m.routed);
   const mixed = hasMixes(market);
+  const typical = typicalPrice(market, mix);
   const models = useMemo(() => [...market.models].sort((a, b) =>
     sort === "spread" ? b.max / b.min - a.max / a.min
     : sort === "median" ? byNum(medianAt(a, mix), medianAt(b, mix), true)
@@ -199,9 +218,12 @@ function Board({ market, now, mix }: { market: ComputeMarket; now: number; mix: 
     <div className="cx-section-head">
       <div>
         <h2 id="compute-board-heading">Price by model</h2>
-        <p className="cx-sub">USD per 1M tokens</p>
+        {typical ? <p className="cx-sub cx-board-median">Median across {count(typical.models)} models <strong>{usd(typical.median)}</strong> per 1M tokens</p> : <p className="cx-sub">USD per 1M tokens</p>}
       </div>
-      <div className="cx-sort" role="group" aria-label="Sort models">{sorts.filter(([key]) => (key !== "gn" || showGn) && (key !== "paid" || showPaid)).map(([key, label]) => <button key={key} type="button" aria-pressed={sort === key} onClick={() => setSort(key)}>{label}</button>)}</div>
+      <div className="cx-board-ctl">
+        {mixed && <MixSwitch mix={mix} onMix={onMix} />}
+        <div className="cx-sort" role="group" aria-label="Sort models">{sorts.filter(([key]) => (key !== "gn" || showGn) && (key !== "paid" || showPaid)).map(([key, label]) => <button key={key} type="button" aria-pressed={sort === key} onClick={() => setSort(key)}>{label}</button>)}</div>
+      </div>
     </div>
     {models.length === 0 ? <p className="cx-empty" role="status">No prices right now. The board fills in at the next read.</p> : <>
     <div className="cx-legend" aria-hidden="true">
@@ -257,13 +279,14 @@ function Moves({ market }: { market: ComputeMarket }) {
   const names = new Map(market.models.map(m => [m.id, m.name]));
   const frequent = frequentRepricers(market.changes);
   const grouped = new Set(frequent.map(changeKey));
-  const changes = market.changes.filter(c => !grouped.has(changeKey(c))).sort((a, b) => b.at_ms - a.at_ms).slice(0, 12);
+  const changes = market.changes.filter(c => !grouped.has(changeKey(c))).sort((a, b) => b.at_ms - a.at_ms).slice(0, 8);
   const Row = ({ provider, model, quantization, min, max, n }: { provider: string; model: string; quantization: string; min: number; max: number; n: number }) => <li>
     <span className="mv-what"><b>{provider}</b><span>{names.get(model) ?? model} · {quantization}</span></span>
     <span className="mv-price">{usd(min)}–{usd(max)}</span>
     <span className="dyn-n"><b>{n}</b> changes</span>
   </li>;
-  return <section className="cx-section cx-moves" aria-labelledby="compute-moves-heading">
+  const twoCols = frequent.length > 0 && (market.dynamic.length > 0);
+  return <><section className="cx-section cx-moves" aria-labelledby="compute-moves-heading">
     <h2 id="compute-moves-heading">Price moves</h2>
     <div className="cx-col">
       <h3>Last price changes</h3>
@@ -277,46 +300,35 @@ function Moves({ market }: { market: ComputeMarket }) {
         </li>;
       })}</ol> : <p className="note">{frequent.length ? "No other seller has changed a price" : "No seller has changed a price"} since {when(market.window.from_ms)}.</p>}
     </div>
+  </section>
+  <section className={`cx-section cx-repricers${twoCols ? "" : " is-one"}`} aria-label="Sellers that reprice often">
     {frequent.length > 0 && <div className="cx-col">
-      <h3>Frequent repricers</h3>
-      <p className="cx-sub">3 or more price changes since {when(market.window.from_ms)}, and their range.</p>
-      <ol className="move-list dyn-list">{frequent.map(f => <Row key={changeKey(f)} {...f} n={f.changes} />)}</ol>
+      <h3>Frequent repricers · 3+ changes since {when(market.window.from_ms)}</h3>
+      <ol className="move-list dyn-list">{frequent.slice(0, MOVES_SHOWN).map(f => <Row key={changeKey(f)} {...f} n={f.changes} />)}</ol>
     </div>}
     {(market.dynamic.length > 0 || frequent.length === 0) && <div className="cx-col">
-      <h3>Dynamic pricers</h3>
-      <p className="cx-sub">Sellers with more than one price in the last 24 h, and their range.</p>
-      {market.dynamic.length ? <ol className="move-list dyn-list">{[...market.dynamic].sort((a, b) => b.changes_24h - a.changes_24h).map(d => <Row key={changeKey(d)} {...d} n={d.changes_24h} />)}</ol>
+      <h3>Dynamic pricers · last 24 h</h3>
+      {market.dynamic.length ? <ol className="move-list dyn-list">{[...market.dynamic].sort((a, b) => b.changes_24h - a.changes_24h).slice(0, MOVES_SHOWN).map(d => <Row key={changeKey(d)} {...d} n={d.changes_24h} />)}</ol>
         : <p className="note">No seller repriced more than once in 24 h.</p>}
     </div>}
-  </section>;
+  </section></>;
 }
 
 function Perp({ latest, history, now }: { latest: ComputeLatest; history: ComputeHistory | null; now: number }) {
   const stale = latestStale(latest, now);
-  const trade = site.computeTrade;
   return <article id="perp" className="cx-panel" aria-labelledby="compute-perp-heading">
     <p className="cx-k">{PERP.name} · {perpSubtitle}</p>
-    <h2 id="compute-perp-heading">The price the perp settles on</h2>
-    <div className="perp-price"><strong>{usd4(latest.mark_usd)}</strong><span>per 1M tokens</span></div>
-    {history && history.points.length >= 2 && history.to_ms - history.from_ms >= 86_400_000 && <figure className="perp-hist">
-      <Sparkline step min={2} series={history.points} label={`Settlement price over 7 days: low ${usd4(history.low)}, high ${usd4(history.high)}.`} className="spark spark-sm" />
-      <figcaption>7 d · low {usd4(history.low)} · high {usd4(history.high)}</figcaption>
-    </figure>}
-    <p className="cx-k">{latest.pricing_set.filter(r => r.up).length} of {latest.pricing_set.length} full-precision sellers up</p>
-    <ul className="perp-sellers" aria-label="Sellers in the settlement price">{latest.pricing_set.map(r => <li key={`${r.provider}-${r.quantization}`}>
-      <span>{r.provider} <span className="q">{r.quantization}</span></span><b>{usd4(r.priced)}</b><Up up={r.up} />
-    </li>)}</ul>
+    <h2 id="compute-perp-heading">Settlement</h2>
+    {history && history.points.length >= 2 && history.to_ms - history.from_ms >= 86_400_000 && <p className="perp-range">7 d · low {usd4(history.low)} · high {usd4(history.high)}</p>}
+    {specRule(latest) && <>
+      <p className="cx-k">{latest.pricing_set.filter(r => r.up).length} of {latest.pricing_set.length} full-precision sellers up</p>
+      <ul className="perp-sellers" aria-label="Sellers in the settlement price">{latest.pricing_set.map(r => <li key={`${r.provider}-${r.quantization}`}>
+        <span>{r.provider} <span className="q">{r.quantization}</span></span><b>{usd4(r.priced)}</b><Up up={r.up} />
+      </li>)}</ul>
+    </>}
     <p className="cx-updated">Pushed {ago(latest.landed_ms, now)} ({when(latest.landed_ms)}){latest.sig && <> · <a href={txUrl(latest.sig)} target="_blank" rel="noreferrer">tx {short(latest.sig)}</a></>}{stale && <> · <Stale why={stale} /></>}</p>
-    <div className="panel-actions">
-      {trade ? trade.startsWith("/") ? <Link className="button-link" to={trade}>Trade {PERP.name} <Arrow /></Link> : <a className="button-link" href={trade}>Trade {PERP.name} <Arrow /></a>
-        : latest.market && <a className="button-link outline" href={addressUrl(latest.market)} target="_blank" rel="noreferrer">Market account <Arrow /></a>}
-      <span className="trade-note">Test tokens</span>
-    </div>
   </article>;
 }
-
-/** "Last 6 hours" from a window in seconds. */
-export const windowLabel = (s: number) => s % 3600 === 0 ? `Last ${s / 3600} ${s === 3600 ? "hour" : "hours"}` : `Last ${Math.round(s / 60)} minutes`;
 
 const ok = (v: number | null | undefined): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
 /** The implied FLOP price is about a millionth of a dollar; per 1 million FLOP it reads as dollars and cents. */
@@ -357,12 +369,6 @@ function Flop({ latest, market, now }: { latest: ComputeLatest; market: ComputeM
         <p className="perp-why">The FLOP price at which FLOP's rate equals what the open market pays for the same compute{basis ? <> on {basis}</> : null}.</p>
       </div>}
     </>}
-    <p className="cx-k flop-window">{windowLabel(flop.window_s ?? site.flopWindowS)}</p>
-    <dl className="flop-facts">{([
-      ["Buyer accounts", flop.buyers ?? "—"],
-      ["Miners", flop.miners ?? "—"],
-      ["Jobs settled", flop.prints ?? "—"],
-    ] as const).map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
     {flop.stale && <p className="note">Not computed right now: {flop.stale}.</p>}
   </article>;
 }
@@ -374,10 +380,10 @@ export default function Compute({ feed }: { feed: ComputeFeedClient | null }) {
   const nothing = !latest && !market;
   return <div className="cx">
     {!loaded && nothing ? <><h1 className="sr-only">Compute index</h1><Skeleton /></>
-      : market ? <FeedBoundary data={market} name="Compute index"><Hero market={market} latest={latest} now={now} error={failed.market ? error : ""} mix={mix} onMix={setMix} /></FeedBoundary>
+      : market ? <FeedBoundary data={market} name="Compute index"><Hero market={market} latest={latest} history={history} now={now} error={failed.market ? error : ""} /></FeedBoundary>
       : <header className="cx-hero is-empty"><div className="cx-hero-main"><h1>Compute index</h1><p role="status" className="error">Market feed unreachable ({failed.market ? error : "no data"}). Try again in a minute.</p></div></header>}
-    {market && <FeedBoundary data={market}><Audience market={market} latest={latest} /></FeedBoundary>}
-    {market && <FeedBoundary data={market} name="Price by model"><Board market={market} now={now} mix={mix} /></FeedBoundary>}
+    {market && <FeedBoundary data={market}><Audience market={market} /></FeedBoundary>}
+    {market && <FeedBoundary data={market} name="Price by model"><Board market={market} now={now} mix={mix} onMix={setMix} /></FeedBoundary>}
     {(latest || failed.latest) && <div className="cx-panels">
       {latest ? <><FeedBoundary data={latest} name={PERP.name}><Perp latest={latest} history={history} now={now} /></FeedBoundary><FeedBoundary data={latest} name="FLOP price"><Flop latest={latest} market={market} now={now} /></FeedBoundary></>
         : <article id="perp" className="cx-panel"><h2>Perp settlement price</h2><p role="status" className="error">Price feed unreachable ({error}). Try again in a minute.</p></article>}
