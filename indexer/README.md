@@ -49,6 +49,7 @@ Flags override environment variables. All flags take a separate value.
 | `--leaderboard-exclude` | `INDEXER_LEADERBOARD_EXCLUDE` | Six devnet matcher/bot portfolio and owner pubkeys listed below |
 | `--start-slot` | `INDEXER_START_SLOT` | Unset (full history); use a fresh DB per season |
 | `--follow` | `INDEXER_FOLLOW` | The program (every transaction). A comma list of addresses, such as the market's LP and maker portfolios, ingests only the transactions that touch them, plus every portfolio later seen in a fill and not in `INDEXER_LEADERBOARD_EXCLUDE` (so traders' deposits and withdrawals are ingested too). Each followed address costs one signatures call per pass, so RPC load grows with the number of traders; a failed backfill of one address is logged and retried next pass without stopping the others. This skips most crank and mark-push traffic. Crank, uptime and liquidation stats then cover only cranks that touch followed portfolios, and a trade with no followed maker or taker is not seen. The set is fixed per database: use a fresh DB to change it |
+| `--max-follow` | `INDEXER_MAX_FOLLOW` | `64`. Most portfolios auto-followed in follow mode, most recently active first; older ones are logged and their later deposits are not seen. A pass slower than three poll intervals logs a `lag:` warning |
 | `--poll-secs` | `INDEXER_POLL_SECS` | `10` |
 | `--rpc-delay-ms` | `INDEXER_RPC_DELAY_MS` | `250` |
 | `--cycle-secs` | `INDEXER_CYCLE_SECS` | `3` |

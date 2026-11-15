@@ -69,19 +69,35 @@ fn followed(c: &Connection, cfg: &Config) -> Result<Vec<Pubkey>> {
     if follows_program(cfg) {
         return Ok(out);
     }
+    // Most recently active first, so the cap keeps the live traders.
     let mut stmt = c.prepare(
-        "SELECT taker_portfolio FROM fills UNION SELECT maker_portfolio FROM fills ORDER BY 1",
+        "SELECT p FROM (SELECT taker_portfolio p, slot FROM fills UNION ALL SELECT maker_portfolio, slot FROM fills)
+         WHERE p IS NOT NULL GROUP BY p ORDER BY MAX(slot) DESC, p",
     )?;
-    for key in stmt.query_map([], |r| r.get::<_, Option<String>>(0))? {
-        let Some(key) = key? else { continue };
+    let (mut added, mut skipped) = (0usize, 0usize);
+    for key in stmt.query_map([], |r| r.get::<_, String>(0))? {
+        let key = key?;
         if cfg.leaderboard_exclude.contains(&key) {
             continue;
         }
-        if let Ok(key) = key.parse::<Pubkey>() {
-            if !out.contains(&key) {
-                out.push(key);
-            }
+        let Ok(key) = key.parse::<Pubkey>() else {
+            continue;
+        };
+        if out.contains(&key) {
+            continue;
         }
+        if added == cfg.max_follow {
+            skipped += 1;
+            continue;
+        }
+        out.push(key);
+        added += 1;
+    }
+    if skipped > 0 {
+        eprintln!(
+            "follow: {skipped} older portfolios not followed (INDEXER_MAX_FOLLOW={})",
+            cfg.max_follow
+        );
     }
     Ok(out)
 }
@@ -474,8 +490,12 @@ fn pass_inner(c: &mut Connection, cfg: &Config) -> Result<()> {
         Duration::from_secs(60),
         CommitmentConfig::finalized(),
     );
+    let started = std::time::Instant::now();
     let addresses = followed(c, cfg)?;
-    if backfill_pending(c, cfg, &addresses)? {
+    // Following the program, the first backfill must finish before catch-up.
+    // In follow mode pending backfills run after this pass's stats are committed,
+    // so a slow or failing one never holds back the others or health.
+    if follows_program(cfg) && backfill_pending(c, cfg, &addresses)? {
         backfill(&rpc, c, cfg, &addresses)?;
     }
     // Capture state first, then ingest landed transactions through that point before
@@ -510,6 +530,17 @@ fn pass_inner(c: &mut Connection, cfg: &Config) -> Result<()> {
     let recent = db::recent_fills(&tx, &agents)?;
     db::set_meta(&tx, "recent_fills_json", &recent.to_string())?;
     tx.commit()?;
+    if !follows_program(cfg) && backfill_pending(c, cfg, &addresses)? {
+        backfill(&rpc, c, cfg, &addresses)?;
+    }
+    let took = started.elapsed().as_secs();
+    if took > cfg.poll_secs.saturating_mul(3) {
+        eprintln!(
+            "lag: pass took {took}s with {} followed addresses (poll {}s); RPC budget may be exceeded",
+            addresses.len(),
+            cfg.poll_secs
+        );
+    }
     Ok(())
 }
 
@@ -730,6 +761,15 @@ mod tests {
         assert_eq!(followed(&c, &cfg).unwrap(), vec![lp, taker]);
         cfg.leaderboard_exclude = vec![taker.to_string()];
         assert_eq!(followed(&c, &cfg).unwrap(), vec![lp]);
+        cfg.leaderboard_exclude.clear();
+        let recent = Pubkey::new_unique();
+        c.execute(
+            "INSERT INTO fills(signature,ix_index,leg,slot,taker_portfolio,maker_portfolio) VALUES('u',0,0,99,?1,?2)",
+            params![recent.to_string(), lp.to_string()],
+        )
+        .unwrap();
+        cfg.max_follow = 1;
+        assert_eq!(followed(&c, &cfg).unwrap(), vec![lp, recent]);
     }
     #[test]
     fn only_backfilled_addresses_are_caught_up() {

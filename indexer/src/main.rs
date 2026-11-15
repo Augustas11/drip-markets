@@ -21,6 +21,8 @@ pub struct Config {
     /// transaction). Following only the market's maker portfolios ingests the
     /// trades and skips the crank and mark-push traffic.
     pub follow: Vec<Pubkey>,
+    /// Most portfolios auto-followed from fills (the most recently active win).
+    pub max_follow: usize,
     pub db: PathBuf,
     pub bind: String,
     pub cors_origins: Vec<String>,
@@ -39,6 +41,7 @@ impl Config {
             ("program-id", "GaXu3DXKYcMs8WmZsgfWcHXQSDva2qe7Aguvn3YHKSHS"),
             ("market", "HyMKxfct1S9aFtq21GG3FUYUViQkmpZdk5pwGRtAz48C"),
             ("follow", ""),
+            ("max-follow", "64"),
             ("db", "indexer.sqlite"),
             ("bind", "127.0.0.1:8090"),
             (
@@ -81,6 +84,7 @@ impl Config {
             program: Pubkey::from_str(&get("program-id"))?,
             market: Pubkey::from_str(&get("market"))?,
             follow: parse_follow(&get("follow"))?,
+            max_follow: number("max-follow")? as usize,
             db: get("db").into(),
             bind: get("bind"),
             cors_origins: get("cors-origins")
