@@ -1,7 +1,10 @@
 # FLOP compute perp: contract spec (devnet demo)
 
 A perpetual future on the dollar price of AI inference. Devnet only, test
-money, not audited. How the index is built in detail: [INDEX.md](INDEX.md).
+money, not audited. The mark has followed the rule under "Settlement rule
+clamp3" below since 2026-11-15. The broad index on the site is described in
+[FEED.md](FEED.md#broad-index-method); [INDEX.md](INDEX.md) is the first
+design, kept for the record.
 
 ## Unit
 
@@ -164,12 +167,14 @@ paired gain over the current rule is above twice its standard error, and an
 independent review has not vetoed it. A recommendation comes with
 the numbers. It does not change the live rule; that takes a reviewed change to this spec.
 
-## Settlement rule clamp3 (proposed, off by default)
+## Settlement rule clamp3 (live on devnet since 2026-11-15)
 
-A proposed replacement for the live rule above. It is code and config
-only: the live rule is unchanged, and `verify-push-log` refuses clamp3
-lines until this spec adopts it. Code: `flop-index/src/clamp3.rs`; scorer
-name `clamp3`.
+The rule behind the devnet COMPUTE-PERP mark since 2026-11-15 02:59 UTC. It
+replaced the rule under "Price sources" above, which the comparisons below
+call "the live rule" because they were written before the switch. The code
+default is still `or_mark_rule = "spec"`; the devnet pusher sets `clamp3`.
+`verify-push-log` checks the earlier rule only and refuses clamp3 lines.
+Code: `flop-index/src/clamp3.rs`; scorer name `clamp3`.
 
 **The rule** (one step per 5-minute fetch):
 
@@ -264,7 +269,9 @@ clamp3 $0.1785, about -0.53 log (-41%). Turning it on moves the mark that
 much at once, so it must be announced in advance.
 
 **Switch-over on 2026-11-15 (devnet COMPUTE-PERP).** The devnet pusher
-turns clamp3 on at about 03:00 UTC on 2026-11-15. At 00:40 UTC that day,
+turned clamp3 on at 02:59 UTC on 2026-11-15, and the mark stepped from
+$0.3036 to $0.1735 (-43%). The rest of this paragraph is the notice
+written before the switch. At 00:40 UTC that day,
 replaying the recorder's history for `qwen/qwen3.8-27b` (2026-11-11 11:08
 UTC onward) through clamp3 gave a mark of about $0.157 per 1M tokens. The
 live rule read $0.3036, so the mark steps down about -0.66 log (-48%) at
