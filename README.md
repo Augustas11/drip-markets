@@ -28,7 +28,7 @@ Flop Labs (FLOP Network) or OpenRouter; it reads their public data.
 | --- | --- |
 | `flop-index/` | The price rule (shared with the mark pusher), the scorer `flop-score`, and the feed generator `flop-feed`. No Solana dependencies. |
 | `docs/` | [RUNBOOK.md](docs/RUNBOOK.md): how to run the MCP server, the agents and the devnet market. |
-| `docs/flop-compute/` | The contract spec ([SPEC.md](docs/flop-compute/SPEC.md)), the index ([INDEX.md](docs/flop-compute/INDEX.md)), the scorer ([SCORER.md](docs/flop-compute/SCORER.md)) and the feed ([FEED.md](docs/flop-compute/FEED.md)). |
+| `docs/flop-compute/` | The contract spec ([SPEC.md](docs/flop-compute/SPEC.md)), the feed and broad index ([FEED.md](docs/flop-compute/FEED.md)), the first index design ([INDEX.md](docs/flop-compute/INDEX.md)) and the scorer ([SCORER.md](docs/flop-compute/SCORER.md)). |
 | `staging/` | The market bots: mark pusher, OpenRouter recorder (`record-or`), launch steps, `verify-push-log`. |
 | `launch/` | Market configs: `flop-compute.toml` (COMPUTE-PERP) and `sol-perp.toml`. |
 | `cranker/` | The keeper: cranks every portfolio of a market each cycle. |

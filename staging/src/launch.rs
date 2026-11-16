@@ -207,7 +207,7 @@ pub struct OracleCfg {
     #[serde(default = "default_or_hold_confirm_s")]
     pub or_hold_confirm_s: u64,
     /// The settlement rule under `openrouter`: "spec" (the shipped rule) or
-    /// "clamp3" (flop_index::clamp3; proposed, off; SPEC.md "Settlement rule
+    /// "clamp3" (flop_index::clamp3; off by default; SPEC.md "Settlement rule
     /// clamp3"). Under clamp3 the line still logs the spec quote.
     #[serde(default = "default_or_mark_rule")]
     pub or_mark_rule: String,

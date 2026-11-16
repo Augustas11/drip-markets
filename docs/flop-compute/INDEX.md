@@ -1,5 +1,10 @@
 # FLOP compute perp: index v0 (devnet demo)
 
+> **Superseded.** This is the first design, which marked the perp on FLOP's
+> on-chain settlements. The live mark is built from seller quotes: see
+> "Settlement rule clamp3" in [SPEC.md](SPEC.md). The broad index on the
+> site is described in [FEED.md](FEED.md#broad-index-method).
+
 A perpetual future on the price of AI inference compute, as settled on FLOP
 Network. It runs on Solana devnet in Percolator, the market lives on our devnet
 wrapper, and its mark comes from FLOP's on-chain settlements. FLOP is only the
