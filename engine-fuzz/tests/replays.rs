@@ -243,7 +243,8 @@ fn upstream_253_control_b_settled_first_passes() {
 //   trader is paid short by the same amount.
 // - Provider funds domain 1 only: the provider covers the gain, the stranded
 //   payment expires and is retired, so the provider recovers less.
-// Present at the pin and at upstream master 37cb14ee. Clean with no provider, with
+// Both cases are fixed at the pin (trader at b22bef7d, provider at 80f8f0b4); the
+// replays stay as regression checks. Clean with no provider, with
 // both domains funded, or when the winner is cranked before the reversal.
 // Accounts: 0 = A (long), 1 = B (short), 2 = unused.
 // ---------------------------------------------------------------------------
@@ -274,13 +275,15 @@ fn design_stale_winner_reversal_trader_gain_is_fixed() {
     assert_eq!(r.accounts[0].out(), 100_190);
 }
 
+/// Fixed at engine 605a89a2 (upstream 80f8f0b4): the provider recovers its 50_000.
+/// At ba32c912 it got 49_800 and the stranded 200 was retired.
 #[test]
-fn design_stale_winner_reversal_provider_loses_principal() {
+fn design_stale_winner_reversal_provider_principal_is_fixed() {
     let r = case_stale_winner_reversal([0, 50_000], false);
-    assert_violates(&r, &[Invariant::NoDefaultRetired, Invariant::ProviderPrincipal]);
+    assert_clean(&r);
     assert_eq!(r.accounts[0].out(), 100_190);
-    assert_eq!(r.provider_out, 49_800);
-    assert_eq!(r.retired, 200);
+    assert_eq!(r.provider_out, 50_000);
+    assert_eq!(r.retired, 0);
 }
 
 #[test]
