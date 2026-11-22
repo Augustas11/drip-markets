@@ -31,10 +31,12 @@ repository root on every re-pin with
 The `.bin` account dumps must have the pinned layout, so refresh any whose
 layout changed first with `solana account <key> --output-file frontend/src/chain/fixtures/<name>.bin`
 (`market.bin` = market, `portfolio.bin` = a trader portfolio, `lp_portfolio.bin` = the LP portfolio).
-`market.bin` is a local-validator market made with `staging step init-market`
-from `launch/sol-perp.toml` with `initial_price = 99938164` and
-`trade_fee_base_bps = 12` (the earlier devnet market's values); the
-portfolio dumps are from devnet.
+All three dumps come from one local-validator run, so they share one market
+group: the `staging step` sequence (`init-market` through `handover`) on
+`launch/sol-perp.toml` with `initial_price = 99938164` and
+`trade_fee_base_bps = 12` (the earlier devnet market's values), then
+`staging bots` until the matcher's first trade gave the trader and the LP
+their legs.
 
 `npm run roundtrip` runs a real devnet round trip. It creates a portfolio,
 deposits, opens, closes and withdraws, then closes the portfolio to refund rent
