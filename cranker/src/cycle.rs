@@ -563,6 +563,16 @@ mod tests {
         pf.capital = percolator::V16PodU128::new(1);
         assert!(resolved_still_owed(&pf));
         pf.capital = percolator::V16PodU128::new(0);
+        // Unconverted PnL of either sign is still owed.
+        pf.pnl = percolator::V16PodI128::new(1);
+        assert!(resolved_still_owed(&pf));
+        pf.pnl = percolator::V16PodI128::new(-1);
+        assert!(resolved_still_owed(&pf));
+        pf.pnl = percolator::V16PodI128::new(0);
+        pf.reserved_pnl = percolator::V16PodU128::new(1);
+        assert!(resolved_still_owed(&pf));
+        pf.reserved_pnl = percolator::V16PodU128::new(0);
+        assert!(!resolved_still_owed(&pf));
         let r = &mut pf.resolved_payout_receipt;
         r.present = 1;
         r.terminal_positive_claim_face = percolator::V16PodU128::new(10);
