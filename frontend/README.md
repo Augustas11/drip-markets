@@ -23,13 +23,20 @@ From the repository root, run `cargo run --release --manifest-path indexer/Cargo
 The indexer listens on `127.0.0.1:8090`; CORS allows `localhost:5173` by default.
 Panels poll every 15 seconds. All figures are devnet, test tokens; mock mode uses deterministic indexer data.
 
-`src/chain/` is the client for upstream Percolator v16 (wrapper `5cb331dd`). Its
-tests match byte for byte the fixtures that the Rust `client/` crate emits from the
-pinned program crate. Regenerate them from the repository root with
+`src/chain/` is the client for upstream Percolator v16 (the wrapper in
+`scripts/pins.env`). Its tests match byte for byte the fixtures that the Rust
+`client/` crate emits from the pinned program crate. Regenerate them from the
+repository root on every re-pin with
 `cargo run --manifest-path client/Cargo.toml --bin ts_fixtures -- frontend/src/chain/fixtures`.
-Refresh the `.bin` account dumps first with
-`solana account -u devnet <key> --output-file frontend/src/chain/fixtures/<name>.bin`
+The `.bin` account dumps must have the pinned layout, so refresh any whose
+layout changed first with `solana account <key> --output-file frontend/src/chain/fixtures/<name>.bin`
 (`market.bin` = market, `portfolio.bin` = a trader portfolio, `lp_portfolio.bin` = the LP portfolio).
+All three dumps come from one local-validator run, so they share one market
+group: the `staging step` sequence (`init-market` through `handover`) on
+`launch/sol-perp.toml` with `initial_price = 99938164` and
+`trade_fee_base_bps = 12` (the earlier devnet market's values), then
+`staging bots` until the matcher's first trade gave the trader and the LP
+their legs.
 
 `npm run roundtrip` runs a real devnet round trip. It creates a portfolio,
 deposits, opens, closes and withdraws, then closes the portfolio to refund rent

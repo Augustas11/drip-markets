@@ -229,22 +229,23 @@ fn upstream_253_control_b_settled_first_passes() {
 }
 
 // ---------------------------------------------------------------------------
-// BY DESIGN, not a bug (verified against spec.md §2.2, the v16.9.1 header and
-// "Distribution characterization"): the engine never nets value across source
-// domains and a reserve is irreversible. Kept because it shows where our stricter
-// "fair payout" and "provider keeps principal" checks go beyond the engine's
-// promise; see README. Related upstream: #175.
-// A loser pays into
-// its loss domain before the winner has settled any claim there, then the price
-// reverses before the winner settles. The loser's payment is stranded in the loss
-// domain with no claim against it, while its later gain claim sits in the other
-// domain backed only by the counterparty's smaller loss.
+// Stale winner, then a price reversal. A loser pays into its loss domain before
+// the winner has settled any claim there, then the price reverses before the
+// winner settles. The loser's payment is stranded in the loss domain with no
+// claim against it, while its later gain claim sits in the other domain backed
+// only by the counterparty's smaller loss.
 // - Provider funds domain 0 only: the provider sweeps the stranded payment and the
 //   trader is paid short by the same amount.
 // - Provider funds domain 1 only: the provider covers the gain, the stranded
 //   payment expires and is retired, so the provider recovers less.
-// Present at the pin and at upstream master 37cb14ee. Clean with no provider, with
-// both domains funded, or when the winner is cranked before the reversal.
+// Our "fair payout" and "provider keeps principal" checks are stricter than the
+// engine's promise here (spec.md §2.2: no netting across source domains, a
+// reserve is irreversible; see README, related upstream #175). Both cases are
+// now clean: the trader case since engine b22bef7d, the provider case on our
+// engine fork 605a89a2 (upstream 80f8f0b4 + our SettleB patch) and, run the same
+// way, on plain upstream 80f8f0b4. The replays stay as regression checks. Clean
+// with no provider, with both domains funded, or when the winner is cranked
+// before the reversal.
 // Accounts: 0 = A (long), 1 = B (short), 2 = unused.
 // ---------------------------------------------------------------------------
 
@@ -274,13 +275,16 @@ fn design_stale_winner_reversal_trader_gain_is_fixed() {
     assert_eq!(r.accounts[0].out(), 100_190);
 }
 
+/// Clean on our engine fork 605a89a2 (upstream 80f8f0b4 + our SettleB patch) and on
+/// plain upstream 80f8f0b4: the provider recovers its 50_000. At ba32c912 it got
+/// 49_800 and the stranded 200 was retired.
 #[test]
-fn design_stale_winner_reversal_provider_loses_principal() {
+fn design_stale_winner_reversal_provider_principal_is_fixed() {
     let r = case_stale_winner_reversal([0, 50_000], false);
-    assert_violates(&r, &[Invariant::NoDefaultRetired, Invariant::ProviderPrincipal]);
+    assert_clean(&r);
     assert_eq!(r.accounts[0].out(), 100_190);
-    assert_eq!(r.provider_out, 49_800);
-    assert_eq!(r.retired, 200);
+    assert_eq!(r.provider_out, 50_000);
+    assert_eq!(r.retired, 0);
 }
 
 #[test]

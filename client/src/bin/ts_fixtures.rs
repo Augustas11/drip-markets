@@ -5,8 +5,9 @@
 //!   upstream `examples/dump_layout.rs`) plus the wrapper's layout constants;
 //! * `instructions.json`: `Instruction::encode` bytes for the 7 instructions
 //!   the client builds, with the arguments used;
-//! * `accounts.json`: values upstream's own readers parse out of the devnet
-//!   account dumps (`market.bin`, `portfolio.bin`, `lp_portfolio.bin`).
+//! * `accounts.json`: values upstream's own readers parse out of the account
+//!   dumps (`market.bin`, `portfolio.bin`, `lp_portfolio.bin`), which must have
+//!   the pinned layout (see frontend/README.md).
 //!
 //!   cargo run --bin ts_fixtures -- ../frontend/src/chain/fixtures
 

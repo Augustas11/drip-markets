@@ -10,8 +10,8 @@
 # scripts/fetch_upstream.sh and the crates' build.rs read. The launch tooling
 # refuses to run when they differ.
 [pins]
-wrapper_sha = "ab2a53656907679ca6f8f86646a1e13c4ae2be54"
-engine_rev = "ba32c912d82bcca7b548f86e145e19c19371ec66"
+wrapper_sha = "0dd898baaeaf5febd1ad7a52026a2423ee172ad4"
+engine_rev = "605a89a2a06064fb66f8b4bd35ed6842ff4e72b1"
 
 # Steps, roles and keys work as in sol-perp.toml.
 [cluster.local]

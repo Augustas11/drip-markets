@@ -139,7 +139,7 @@ it("builds a fresh TradeCpi binding with the LP's runtime owner and no LP signer
   expect(u64(trade.data, 1)).toBe(2n);
   expect(u64(trade.data, 9)).toBe(16n);
   expect(u64(trade.data, 17)).toBe(1n);
-  expect(u64(trade.data, 25)).toBe(15n);
+  expect(u64(trade.data, 25)).toBe(parsePortfolio(lp).positionEpoch);
   expect(u64(trade.data, 33)).toBe(1n);
   expect(i128(trade.data, 51)).toBe(-123n);
   expect(trade.keys.filter(key => key.isSigner).map(key => key.pubkey)).toEqual([owner]);

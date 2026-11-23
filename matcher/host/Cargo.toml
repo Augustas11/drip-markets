@@ -12,7 +12,7 @@ publish = false
 solana-sdk = "1.18"
 solana-client = "1.18"
 percolator-prog = { path = "../../upstream/percolator-prog", features = ["no-entrypoint"], default-features = false }
-percolator = { git = "https://github.com/Augustas11/percolator", rev = "ba32c912d82bcca7b548f86e145e19c19371ec66" }
+percolator = { git = "https://github.com/Augustas11/percolator", rev = "605a89a2a06064fb66f8b4bd35ed6842ff4e72b1" }
 spl-token = { version = "4.0", features = ["no-entrypoint"] }
 anyhow = "1"
 

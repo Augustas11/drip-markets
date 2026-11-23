@@ -204,6 +204,19 @@ fn renew_refresh_on_idle(portfolio: &PortfolioAccountV16Account) -> bool {
     !portfolio.legs.iter().any(|leg| leg.active != 0)
 }
 
+/// Resolved market: the account still has work left if capital/PnL remain,
+/// a leg is still active (unsettled), or a payout receipt is not fully paid.
+fn resolved_still_owed(pf: &PortfolioAccountV16Account) -> bool {
+    let r = &pf.resolved_payout_receipt;
+    pf.capital.get() != 0
+        || pf.pnl.get() != 0
+        || pf.reserved_pnl.get() != 0
+        || pf.active_bitmap.iter().any(|w| w.get() != 0)
+        || (r.present != 0
+            && r.finalized == 0
+            && r.paid_effective.get() < r.terminal_positive_claim_face.get())
+}
+
 // Stay below the monitor's KeeperNoSuccessfulCrank alert (750 slots + 1 minute).
 const KEEPER_HEARTBEAT_SECS: u64 = 240;
 
@@ -338,18 +351,12 @@ pub fn run_one_cycle(
         }
         // Still owed work: persistent idle on such an account is reported as
         // stuck, not hidden as "idle".
-        // * Resolved: capital/PnL left, or a payout receipt not yet fully paid.
+        // * Resolved: see `resolved_still_owed`.
         // * Live/Recovery: the off-chain estimate says it is liquidatable or
         //   pending, yet the engine keeps answering NonProgress / no-mut.
         let owed = decoded.as_ref().is_some_and(|pf| {
             if resolved {
-                let r = &pf.resolved_payout_receipt;
-                pf.capital.get() != 0
-                    || pf.pnl.get() != 0
-                    || pf.reserved_pnl.get() != 0
-                    || (r.present != 0
-                        && r.finalized == 0
-                        && r.paid_effective.get() < r.terminal_positive_claim_face.get())
+                resolved_still_owed(pf)
             } else {
                 priority != Priority::Quiet
             }
@@ -543,6 +550,36 @@ mod tests {
         let w1 = pick_winners(&gains, 1);
         assert_eq!(w1, [pk(3), pk(4)].into_iter().collect());
         assert!(pick_winners(&[], 7).is_empty());
+    }
+
+    #[test]
+    fn resolved_still_owed_counts_active_legs() {
+        let mut pf: PortfolioAccountV16Account = bytemuck::Zeroable::zeroed();
+        assert!(!resolved_still_owed(&pf));
+        // Only an unsettled leg left: still owed, so persistent idle reads as stuck.
+        pf.active_bitmap[0] = percolator::V16PodU64::new(1);
+        assert!(resolved_still_owed(&pf));
+        pf.active_bitmap[0] = percolator::V16PodU64::new(0);
+        pf.capital = percolator::V16PodU128::new(1);
+        assert!(resolved_still_owed(&pf));
+        pf.capital = percolator::V16PodU128::new(0);
+        // Unconverted PnL of either sign is still owed.
+        pf.pnl = percolator::V16PodI128::new(1);
+        assert!(resolved_still_owed(&pf));
+        pf.pnl = percolator::V16PodI128::new(-1);
+        assert!(resolved_still_owed(&pf));
+        pf.pnl = percolator::V16PodI128::new(0);
+        pf.reserved_pnl = percolator::V16PodU128::new(1);
+        assert!(resolved_still_owed(&pf));
+        pf.reserved_pnl = percolator::V16PodU128::new(0);
+        assert!(!resolved_still_owed(&pf));
+        let r = &mut pf.resolved_payout_receipt;
+        r.present = 1;
+        r.terminal_positive_claim_face = percolator::V16PodU128::new(10);
+        r.paid_effective = percolator::V16PodU128::new(9);
+        assert!(resolved_still_owed(&pf));
+        pf.resolved_payout_receipt.finalized = 1;
+        assert!(!resolved_still_owed(&pf));
     }
 
     #[test]
